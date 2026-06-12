@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SyncEngine</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ClockSync.fs" />
+    <Compile Include="SyncEngine.fs" />
+    <Compile Include="BufferManager.fs" />
+    <Compile Include="RoomState.fs" />
+    <Compile Include="Api.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" Version="4.*" />
+  </ItemGroup>
+</Project>

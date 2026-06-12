@@ -1,0 +1,19 @@
+{
+  "name": "joshtv-fable",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SyncCine - synchronized movie watching with chat (host streams a local MP4 to up to 10 viewers)",
+  "workspaces": [
+    "apps/web",
+    "apps/server"
+  ],
+  "scripts": {
+    "fable": "dotnet tool restore && dotnet fable packages/sync-engine --outDir apps/web/src/fable-gen --noCache",
+    "dev": "npm run fable && concurrently -n server,web -c blue,magenta \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
+    "build": "npm run fable && npm run build -w apps/server && npm run build -w apps/web",
+    "start": "node apps/server/dist/index.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

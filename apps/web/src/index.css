@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  /* Reserve scrollbar space so its appearance never shifts the layout
+     (a width change here can oscillate responsive breakpoints). */
+  scrollbar-gutter: stable;
+}
+
+body {
+  @apply bg-cinema-bg text-cinema-text font-body antialiased;
+}
+
+/* Film grain hero overlay */
+.film-grain {
+  /* The grain layer shifts around for the effect — clip it so the page
+     never gains scrollbars from the movement. */
+  overflow: hidden;
+}
+
+.film-grain::after {
+  content: "";
+  position: absolute;
+  /* Oversized so the animated translate never exposes an edge. */
+  inset: -10%;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  animation: grain 0.6s steps(4) infinite;
+}
+
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(-2%, 1%); }
+  50% { transform: translate(1%, -2%); }
+  75% { transform: translate(-1%, 2%); }
+  100% { transform: translate(0, 0); }
+}
+
+/* Floating emoji reactions */
+@keyframes float-up {
+  0% { transform: translateY(0) scale(0.7); opacity: 0; }
+  10% { opacity: 1; transform: translateY(-8%) scale(1.1); }
+  100% { transform: translateY(-90vh) scale(1); opacity: 0; }
+}
+
+.reaction-float {
+  animation: float-up 3.2s ease-out forwards;
+}
+
+/* Sync pulse: thin flash line at top of video on sync events */
+@keyframes sync-pulse {
+  0% { opacity: 1; transform: scaleX(0); }
+  60% { opacity: 1; transform: scaleX(1); }
+  100% { opacity: 0; transform: scaleX(1); }
+}
+
+.sync-pulse {
+  transform-origin: left;
+  animation: sync-pulse 0.3s ease-out forwards;
+}
+
+/* Film-strip tick pattern on the seek bar track */
+.filmstrip-track {
+  background-image: repeating-linear-gradient(
+    to right,
+    #2a2a3e 0px,
+    #2a2a3e 6px,
+    #1a1a2e 6px,
+    #1a1a2e 8px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reaction-float,
+  .film-grain::after,
+  .sync-pulse {
+    animation: none;
+  }
+  .reaction-float {
+    display: none;
+  }
+}
+
+input[type="range"].seek-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].seek-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 14px;
+  width: 14px;
+  border-radius: 9999px;
+  background: #e94560;
+  margin-top: -5px;
+}
+
+input[type="range"].seek-range::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border: none;
+  border-radius: 9999px;
+  background: #e94560;
+}
+
+input[type="range"].seek-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(245, 245, 240, 0.25);
+}
+
+input[type="range"].seek-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(245, 245, 240, 0.25);
+}
