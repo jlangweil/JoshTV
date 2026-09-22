@@ -46,7 +46,6 @@ export interface Room {
   roomId: string;
   hostToken: string;
   hostSocketId: string | null;
-  password: string | null;
   users: Map<string, RoomUser>;
   playbackState: PlaybackState;
   guestBufferStates: Map<string, GuestBufferState>;

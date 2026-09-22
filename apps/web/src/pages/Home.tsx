@@ -2,13 +2,13 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createRoom, getRoomInfo } from "../lib/api";
 import { Identity, loadIdentity, saveIdentity, saveHostToken } from "../lib/identity";
+import { extractRoomCode } from "../lib/invite";
 import { IdentityForm } from "../components/IdentityForm";
 
 export default function HomePage() {
   const navigate = useNavigate();
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
   const [joinCode, setJoinCode] = useState("");
-  const [hostPassword, setHostPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -16,7 +16,7 @@ export default function HomePage() {
     setBusy(true);
     setError(null);
     try {
-      const { roomId, hostToken } = await createRoom(hostPassword || undefined);
+      const { roomId, hostToken } = await createRoom();
       saveHostToken(roomId, hostToken);
       navigate(`/room/${roomId}`);
     } catch {
@@ -49,7 +49,7 @@ export default function HomePage() {
     <div className="film-grain relative flex min-h-dvh flex-col items-center justify-center gap-10 px-6 py-16">
       <header className="text-center">
         <h1 className="font-display text-6xl tracking-tight text-cinema-text max-sm:text-4xl">
-          Sync<span className="text-cinema-accent">Cine</span>
+          Josh<span className="text-cinema-accent">TV</span>
         </h1>
         <p className="mt-3 text-lg text-cinema-muted">Host a movie night. Everyone watches in perfect sync.</p>
       </header>
@@ -71,14 +71,6 @@ export default function HomePage() {
             <p className="text-sm text-cinema-muted">
               You pick a local MP4. It streams peer-to-peer to up to 10 friends, or everyone plays their own copy in sync.
             </p>
-            <input
-              type="password"
-              className="rounded-lg border border-cinema-surface bg-cinema-bg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cinema-accent"
-              placeholder="Optional room password"
-              value={hostPassword}
-              onChange={(e) => setHostPassword(e.target.value)}
-              aria-label="Optional room password"
-            />
             <button
               type="button"
               onClick={host}
@@ -91,13 +83,13 @@ export default function HomePage() {
 
           <div className="flex flex-1 flex-col gap-3 rounded-2xl border border-cinema-surface bg-cinema-panel p-6">
             <h2 className="font-display text-2xl">Join with Code</h2>
-            <p className="text-sm text-cinema-muted">Got a 6-character code from a friend?</p>
+            <p className="text-sm text-cinema-muted">Got a 6-character code or an invite link from a friend?</p>
             <input
               className="rounded-lg border border-cinema-surface bg-cinema-bg px-3 py-2 text-center font-mono text-lg uppercase tracking-[0.4em] focus:outline-none focus:ring-2 focus:ring-cinema-accent"
               placeholder="ABC123"
-              maxLength={6}
               value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+              // Accepts a pasted invite link too; only the code is kept.
+              onChange={(e) => setJoinCode(extractRoomCode(e.target.value).slice(0, 6))}
               onKeyDown={(e) => e.key === "Enter" && join()}
               aria-label="Room code"
             />

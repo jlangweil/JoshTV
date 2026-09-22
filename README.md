@@ -1,4 +1,4 @@
-# SyncCine (joshtv-fable)
+# JoshTV (joshtv-fable)
 
 Host a movie night: one host loads a **local MP4** and up to **10 viewers** watch it in
 perfect sync, with real-time chat, floating emoji reactions, and a fullscreen mode that
@@ -27,8 +27,11 @@ npm install
 npm run dev        # compiles F# → JS, then starts server (:3001) + web (:5173)
 ```
 
-Open http://localhost:5173, create a room, load an MP4, and share the room link.
-To test locally, open a second browser window (or incognito) and join with the code.
+Open http://localhost:5173, create a room, load an MP4, and click **Copy invite link**
+to share the room. Friends who open the link are asked for a name and avatar color the
+first time; after that their browser remembers them and the link drops them straight in.
+To test locally, join from an incognito window or a different browser (a normal second
+tab is recognized as the host).
 
 ### Production build
 
@@ -91,7 +94,8 @@ If viewers already have the movie, nothing needs to stream:
 
 ## Feature checklist
 
-- Rooms: 6-char codes, optional password, 12h expiry, 10-guest cap, host-token auth
+- Rooms: 6-char codes, shareable invite links (`/room/CODE`), 12h expiry, 10-guest cap,
+  host-token auth (remembered per browser, so the host keeps control across tabs)
 - Host disconnect → 30s grace overlay; auto-resume on reconnect (RM-07/08)
 - Own-copy mode: viewers can play a local copy; host can turn streaming off entirely
 - Buffering gate (SP-10): Play disabled until every viewer reports `readyState ≥ 3`
@@ -103,7 +107,9 @@ If viewers already have the movie, nothing needs to stream:
 - Player: speed sync (0.5–1.5×), volume/mute (local), PiP, `.vtt`/`.srt` subtitles
   broadcast to all, controls auto-hide after 3s, keyboard (space/f/c), ARIA labels,
   `prefers-reduced-motion` respected
-- Identity: display name + 12 pastel avatar colors in `localStorage`, no accounts
+- Identity: display name + 12 pastel avatar colors in `localStorage`, no accounts —
+  first-time visitors are prompted before joining, returning ones go straight in; the Home
+  join box also accepts a pasted invite link
 
 ## Repo layout
 
@@ -133,7 +139,7 @@ on the public internet):
 | Platform | How |
 |---|---|
 | **Railway / Render / Fly.io** | Point at this repo; they detect the `Dockerfile` and build/run it. Done. |
-| **Any VPS** | `docker build -t synccine . && docker run -p 80:3001 synccine` behind a TLS proxy (Caddy/nginx). |
+| **Any VPS** | `docker build -t joshtv . && docker run -p 80:3001 joshtv` behind a TLS proxy (Caddy/nginx). |
 | **Vercel (frontend) + Railway (server)** | Possible but unnecessary — you'd need to point the web app's socket/API at the server origin. The single-service deploy avoids that. |
 
 The `Dockerfile` exists because the build needs both the .NET SDK (Fable F# → JS)

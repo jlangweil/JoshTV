@@ -1,18 +1,13 @@
 export interface RoomInfo {
   exists: boolean;
-  hasPassword: boolean;
   guestCount: number;
   maxGuests: number;
   hasFile: boolean;
   hostConnected: boolean;
 }
 
-export async function createRoom(password?: string): Promise<{ roomId: string; hostToken: string }> {
-  const res = await fetch("/api/rooms", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password: password || undefined }),
-  });
+export async function createRoom(): Promise<{ roomId: string; hostToken: string }> {
+  const res = await fetch("/api/rooms", { method: "POST" });
   if (!res.ok) throw new Error("Failed to create room");
   return res.json();
 }

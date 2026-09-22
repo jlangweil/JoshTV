@@ -20,7 +20,7 @@ function generateRoomCode(): string {
   return code;
 }
 
-export function createRoom(password?: string): Room {
+export function createRoom(): Room {
   let roomId = generateRoomCode();
   while (rooms.has(roomId)) roomId = generateRoomCode();
 
@@ -28,7 +28,6 @@ export function createRoom(password?: string): Room {
     roomId,
     hostToken: randomUUID(),
     hostSocketId: null,
-    password: password?.trim() ? password.trim() : null,
     users: new Map(),
     playbackState: { playing: false, currentTime: 0, updatedAt: Date.now(), speed: 1 },
     guestBufferStates: new Map(),

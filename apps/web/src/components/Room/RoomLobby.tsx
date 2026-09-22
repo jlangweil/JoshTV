@@ -1,7 +1,9 @@
 import { RoomUser, GuestBufferState } from "../../types";
 import { GuestList } from "./GuestList";
+import { InvitePanel } from "./InviteLink";
 
 interface Props {
+  roomId: string;
   isHost: boolean;
   users: RoomUser[];
   bufferStates: Record<string, GuestBufferState>;
@@ -9,7 +11,7 @@ interface Props {
 }
 
 /** RM-06: shown until the host loads a file. */
-export function RoomLobby({ isHost, users, bufferStates, onPickFile }: Props) {
+export function RoomLobby({ roomId, isHost, users, bufferStates, onPickFile }: Props) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 p-8 text-center">
       <div className="animate-bounce text-6xl" aria-hidden="true">
@@ -44,6 +46,7 @@ export function RoomLobby({ isHost, users, bufferStates, onPickFile }: Props) {
       ) : (
         <p className="font-display text-2xl text-cinema-text/90">Waiting for the host to load a movie…</p>
       )}
+      <InvitePanel roomId={roomId} />
       <GuestList users={users} bufferStates={bufferStates} showBufferDots={isHost} />
     </div>
   );

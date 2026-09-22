@@ -19,8 +19,8 @@ app.use((_req, res, next) => {
   next();
 });
 
-app.post("/api/rooms", (req, res) => {
-  const room = createRoom(req.body?.password);
+app.post("/api/rooms", (_req, res) => {
+  const room = createRoom();
   res.json({ roomId: room.roomId, hostToken: room.hostToken });
 });
 
@@ -30,7 +30,6 @@ app.get("/api/rooms/:id", (req, res) => {
   const guestCount = [...room.users.values()].filter((u) => !u.isHost).length;
   res.json({
     exists: true,
-    hasPassword: room.password !== null,
     guestCount,
     maxGuests: MAX_GUESTS,
     hasFile: room.fileMeta !== null,
@@ -67,5 +66,5 @@ setInterval(() => {
 }, 60_000);
 
 httpServer.listen(PORT, () => {
-  console.log(`SyncCine server listening on http://localhost:${PORT}`);
+  console.log(`JoshTV server listening on http://localhost:${PORT}`);
 });

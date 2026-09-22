@@ -46,7 +46,6 @@ interface Options {
   identity: Identity;
   isHost: boolean;
   hostToken?: string | null;
-  password?: string;
   /** Guest: FileMeta.id of media already held, read at each (re)join. */
   mediaFileIdRef?: MutableRefObject<string | null>;
 }
@@ -56,7 +55,6 @@ export function useRoomConnection({
   identity,
   isHost,
   hostToken,
-  password,
   mediaFileIdRef,
 }: Options): RoomConnection {
   const socket = useMemo(() => {
@@ -140,7 +138,6 @@ export function useRoomConnection({
           color: identity.color,
           isHost,
           hostToken,
-          password,
           mediaFileId: mediaFileIdRef?.current ?? undefined,
         },
         (res: { ok: boolean; error?: string }) => {
@@ -167,7 +164,7 @@ export function useRoomConnection({
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
     };
-  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, password, mediaFileIdRef]);
+  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, mediaFileIdRef]);
 
   // ---- Room state events ----
   useEffect(() => {

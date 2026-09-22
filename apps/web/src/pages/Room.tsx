@@ -16,6 +16,7 @@ import { VideoPlayer } from "../components/VideoPlayer/VideoPlayer";
 import { ChatPanel } from "../components/Chat/ChatPanel";
 import { RoomLobby } from "../components/Room/RoomLobby";
 import { GuestList } from "../components/Room/GuestList";
+import { CopyLinkButton } from "../components/Room/InviteLink";
 import { IdentityForm } from "../components/IdentityForm";
 import { FilePickButton } from "../components/FilePickButton";
 import { formatTime } from "../components/VideoPlayer/SeekBar";
@@ -24,9 +25,7 @@ export default function RoomPage() {
   const { roomId = "" } = useParams();
   const normalizedId = roomId.toUpperCase();
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
-  const [password, setPassword] = useState<string | null>(null);
   const [roomCheck, setRoomCheck] = useState<"loading" | "missing" | "ok">("loading");
-  const [needsPassword, setNeedsPassword] = useState(false);
   const hostToken = useMemo(() => loadHostToken(normalizedId), [normalizedId]);
   const isHost = hostToken !== null;
 
@@ -35,15 +34,13 @@ export default function RoomPage() {
     getRoomInfo(normalizedId)
       .then((info) => {
         if (cancelled) return;
-        if (!info?.exists) return setRoomCheck("missing");
-        setNeedsPassword(info.hasPassword && !isHost);
-        setRoomCheck("ok");
+        setRoomCheck(info?.exists ? "ok" : "missing");
       })
       .catch(() => !cancelled && setRoomCheck("missing"));
     return () => {
       cancelled = true;
     };
-  }, [normalizedId, isHost]);
+  }, [normalizedId]);
 
   if (roomCheck === "loading") {
     return <CenteredShell><p className="text-cinema-muted">Looking up room…</p></CenteredShell>;
@@ -57,10 +54,16 @@ export default function RoomPage() {
       </CenteredShell>
     );
   }
+  // First visit from an invite link: ask who they are before joining.
+  // Returning people are remembered (localStorage) and go straight in.
   if (!identity) {
     return (
       <CenteredShell>
         <h1 className="font-display text-3xl">Who's watching?</h1>
+        <p className="text-cinema-muted">
+          You're joining room <span className="font-mono tracking-widest text-cinema-text">{normalizedId}</span>.
+          We'll remember you next time.
+        </p>
         <IdentityForm
           onSubmit={(id) => {
             saveIdentity(id);
@@ -71,33 +74,6 @@ export default function RoomPage() {
       </CenteredShell>
     );
   }
-  if (needsPassword && password === null) {
-    return (
-      <CenteredShell>
-        <h1 className="font-display text-3xl">This room is locked</h1>
-        <form
-          className="flex w-full max-w-sm flex-col gap-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const value = new FormData(e.currentTarget).get("pw");
-            setPassword(String(value ?? ""));
-          }}
-        >
-          <input
-            name="pw"
-            type="password"
-            placeholder="Room password"
-            className="rounded-lg border border-cinema-surface bg-cinema-bg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
-            autoFocus
-            aria-label="Room password"
-          />
-          <button type="submit" className="rounded-lg bg-cinema-accent px-4 py-2 font-semibold text-white">
-            Enter
-          </button>
-        </form>
-      </CenteredShell>
-    );
-  }
 
   return (
     <RoomInner
@@ -105,7 +81,6 @@ export default function RoomPage() {
       identity={identity}
       isHost={isHost}
       hostToken={hostToken}
-      password={password ?? undefined}
     />
   );
 }
@@ -121,13 +96,12 @@ interface InnerProps {
   identity: Identity;
   isHost: boolean;
   hostToken: string | null;
-  password?: string;
 }
 
-function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps) {
+function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
   // Guest: id of the file we fully hold, so a reconnect doesn't re-stream it.
   const mediaFileIdRef = useRef<string | null>(null);
-  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, password, mediaFileIdRef });
+  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef });
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef);
@@ -561,9 +535,10 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
     <div className="flex h-dvh flex-col overflow-hidden">
       <header className="flex flex-wrap items-center gap-3 border-b border-cinema-surface bg-cinema-panel px-4 py-2">
         <Link to="/" className="font-display text-xl text-cinema-accent">
-          SyncCine
+          JoshTV
         </Link>
         <span className="font-mono text-sm tracking-widest text-cinema-text/80">{roomId}</span>
+        <CopyLinkButton roomId={roomId} />
         {conn.fileMeta && (
           <span className="hidden truncate text-xs text-cinema-muted sm:inline" title={conn.fileMeta.name}>
             {conn.fileMeta.name}
@@ -669,6 +644,7 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
         ) : (
           <div className="min-h-0 grow">
             <RoomLobby
+              roomId={roomId}
               isHost={isHost}
               users={conn.users}
               bufferStates={conn.bufferStates}

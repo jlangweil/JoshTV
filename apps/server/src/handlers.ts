@@ -74,7 +74,6 @@ export function registerHandlers(io: Server, socket: Socket): void {
         color: string;
         isHost: boolean;
         hostToken?: string;
-        password?: string;
         /** File id the guest already holds (finished download or local copy). */
         mediaFileId?: string;
       },
@@ -98,9 +97,6 @@ export function registerHandlers(io: Server, socket: Socket): void {
         }
         room.hostSocketId = socket.id;
       } else {
-        if (room.password && data.password !== room.password) {
-          return ack?.({ ok: false, error: "Wrong password" });
-        }
         const guestCount = [...room.users.values()].filter((u) => !u.isHost).length;
         if (guestCount >= MAX_GUESTS) {
           return ack?.({ ok: false, error: "Room is full" });

@@ -2,7 +2,7 @@
   "name": "joshtv-fable",
   "private": true,
   "version": "0.1.0",
-  "description": "SyncCine - synchronized movie watching with chat (host streams a local MP4 to up to 10 viewers)",
+  "description": "JoshTV - synchronized movie watching with chat (host streams a local MP4 to up to 10 viewers)",
   "workspaces": [
     "apps/web",
     "apps/server"
