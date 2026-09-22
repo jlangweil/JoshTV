@@ -69,7 +69,7 @@ export default function HomePage() {
           <div className="flex flex-1 flex-col gap-3 rounded-2xl border border-cinema-surface bg-cinema-panel p-6">
             <h2 className="font-display text-2xl">Host a Movie Night</h2>
             <p className="text-sm text-cinema-muted">
-              You pick a local MP4 — it streams peer-to-peer to up to 10 friends.
+              You pick a local MP4. It streams peer-to-peer to up to 10 friends, or everyone plays their own copy in sync.
             </p>
             <input
               type="password"

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, MutableRefObject } from "react";
 import { io, Socket } from "socket.io-client";
 import {
   PlaybackState,
@@ -15,6 +15,8 @@ export interface RoomConnection {
   socket: Socket;
   connected: boolean;
   joined: boolean;
+  /** Increments on every successful join, including reconnects. */
+  joinCount: number;
   joinError: string | null;
   users: RoomUser[];
   chat: ChatMessage[];
@@ -29,6 +31,8 @@ export interface RoomConnection {
   hostConnected: boolean;
   hostGoneForever: boolean;
   autoPauseOnBufferLow: boolean;
+  /** False when the host wants every viewer to load their own copy. */
+  streamToGuests: boolean;
   subtitleVtt: string | null;
   syncPulse: number;
   sendChat: (text: string) => void;
@@ -43,9 +47,18 @@ interface Options {
   isHost: boolean;
   hostToken?: string | null;
   password?: string;
+  /** Guest: FileMeta.id of media already held, read at each (re)join. */
+  mediaFileIdRef?: MutableRefObject<string | null>;
 }
 
-export function useRoomConnection({ roomId, identity, isHost, hostToken, password }: Options): RoomConnection {
+export function useRoomConnection({
+  roomId,
+  identity,
+  isHost,
+  hostToken,
+  password,
+  mediaFileIdRef,
+}: Options): RoomConnection {
   const socket = useMemo(() => {
     const options = {
       // Connection is driven by the lifecycle effect below so React
@@ -66,6 +79,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
 
   const [connected, setConnected] = useState(false);
   const [joined, setJoined] = useState(false);
+  const [joinCount, setJoinCount] = useState(0);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
@@ -78,6 +92,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
   const [hostConnected, setHostConnected] = useState(true);
   const [hostGoneForever, setHostGoneForever] = useState(false);
   const [autoPauseOnBufferLow, setAutoPause] = useState(false);
+  const [streamToGuests, setStreamToGuests] = useState(true);
   const [subtitleVtt, setSubtitleVtt] = useState<string | null>(null);
   const [syncPulse, setSyncPulse] = useState(0);
 
@@ -119,10 +134,19 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
       runSync();
       socket.emit(
         "room:join",
-        { roomId, name: identity.name, color: identity.color, isHost, hostToken, password },
+        {
+          roomId,
+          name: identity.name,
+          color: identity.color,
+          isHost,
+          hostToken,
+          password,
+          mediaFileId: mediaFileIdRef?.current ?? undefined,
+        },
         (res: { ok: boolean; error?: string }) => {
           if (res.ok) {
             setJoined(true);
+            setJoinCount((n) => n + 1);
             setJoinError(null);
           } else {
             setJoinError(res.error ?? "Could not join room");
@@ -143,7 +167,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
     };
-  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, password]);
+  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, password, mediaFileIdRef]);
 
   // ---- Room state events ----
   useEffect(() => {
@@ -154,6 +178,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
         setPlaybackState(d.playbackState);
         setFileMeta(d.fileMeta ?? null);
         setAutoPause(Boolean(d.autoPauseOnBufferLow));
+        setStreamToGuests(d.streamToGuests !== false);
         setHostConnected(Boolean(d.hostConnected));
       },
       "sync:play": (d) => {
@@ -203,6 +228,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
       },
       "host:gone": () => setHostGoneForever(true),
       "room:auto-pause": (d) => setAutoPause(Boolean(d.enabled)),
+      "room:stream-mode": (d) => setStreamToGuests(Boolean(d.enabled)),
       "caption:update": (d) => setSubtitleVtt(d.vttContent),
       "room:closed": () => setJoinError("Room expired"),
     };
@@ -232,6 +258,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
     socket,
     connected,
     joined,
+    joinCount,
     joinError,
     users,
     chat,
@@ -245,6 +272,7 @@ export function useRoomConnection({ roomId, identity, isHost, hostToken, passwor
     hostConnected,
     hostGoneForever,
     autoPauseOnBufferLow,
+    streamToGuests,
     subtitleVtt,
     syncPulse,
     sendChat,

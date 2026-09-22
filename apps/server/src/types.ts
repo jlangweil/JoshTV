@@ -24,6 +24,8 @@ export interface RoomUser {
 }
 
 export interface FileMeta {
+  /** Server-assigned per load; lets clients tell a replaced file from the current one. */
+  id: string;
   name: string;
   size: number;
   duration: number;
@@ -36,6 +38,8 @@ export interface GuestBufferState {
   ready: boolean;
   receivedBytes: number;
   complete: boolean;
+  /** Guest is playing its own local copy instead of the host's stream. */
+  local: boolean;
 }
 
 export interface Room {
@@ -50,6 +54,8 @@ export interface Room {
   subtitleVtt: string | null;
   fileMeta: FileMeta | null;
   autoPauseOnBufferLow: boolean;
+  /** When false, nobody is streamed to — every guest loads their own copy. */
+  streamToGuests: boolean;
   lastActivity: number;
   hostGraceTimer: NodeJS.Timeout | null;
 }

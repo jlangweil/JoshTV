@@ -22,6 +22,8 @@ export interface RoomUser {
 }
 
 export interface FileMeta {
+  /** Server-assigned per load; changes whenever the host replaces the video. */
+  id: string;
   name: string;
   size: number;
   duration: number;
@@ -34,6 +36,8 @@ export interface GuestBufferState {
   ready: boolean;
   receivedBytes: number;
   complete: boolean;
+  /** Guest is playing its own local copy instead of the host's stream. */
+  local: boolean;
 }
 
 export interface Reaction {

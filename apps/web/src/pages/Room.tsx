@@ -17,6 +17,8 @@ import { ChatPanel } from "../components/Chat/ChatPanel";
 import { RoomLobby } from "../components/Room/RoomLobby";
 import { GuestList } from "../components/Room/GuestList";
 import { IdentityForm } from "../components/IdentityForm";
+import { FilePickButton } from "../components/FilePickButton";
+import { formatTime } from "../components/VideoPlayer/SeekBar";
 
 export default function RoomPage() {
   const { roomId = "" } = useParams();
@@ -123,15 +125,19 @@ interface InnerProps {
 }
 
 function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps) {
-  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, password });
+  // Guest: id of the file we fully hold, so a reconnect doesn't re-stream it.
+  const mediaFileIdRef = useRef<string | null>(null);
+  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, password, mediaFileIdRef });
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef);
 
   // ---- Media sources ----
   const [hostSrc, setHostSrc] = useState<string | null>(null);
-  const receiver = useGuestReceiver(conn.socket, conn.joined && !isHost, videoRef);
+  const receiver = useGuestReceiver(conn.socket, conn.joined && !isHost, videoRef, conn.fileMeta?.id ?? null);
+  mediaFileIdRef.current = receiver.complete ? receiver.fileId : null;
   const src = isHost ? hostSrc : receiver.src;
+  const usingLocalCopy = receiver.mode === "local";
 
   // ---- Local-only audio (PC-03/PC-04) ----
   const [volume, setVolume] = useState(1);
@@ -150,9 +156,33 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
     conn.socket,
     videoRef,
     conn.joined && !isHost && Boolean(src),
+    receiver.fileId,
     receiver.receivedBytes,
-    receiver.complete
+    receiver.complete,
+    usingLocalCopy
   );
+
+  // ---- Guest: play your own copy instead of the host's stream ----
+  const { loadLocalFile } = receiver;
+  const [localWarning, setLocalWarning] = useState<string | null>(null);
+  const pickLocalCopy = useCallback(
+    async (file: File) => {
+      const expected = conn.fileMeta;
+      loadLocalFile(file);
+      setLocalWarning(null);
+      // Byte-identical copies are the common case; otherwise sanity-check length.
+      if (!expected || file.size === expected.size) return;
+      const meta = await probeVideoMeta(file).catch(() => null);
+      if (meta && meta.duration > 0 && expected.duration > 0 && Math.abs(meta.duration - expected.duration) > 2) {
+        setLocalWarning(
+          `Your file runs ${formatTime(meta.duration)} but the host's runs ${formatTime(expected.duration)}. ` +
+            `It may be a different cut, so scenes won't line up.`
+        );
+      }
+    },
+    [conn.fileMeta, loadLocalFile]
+  );
+  useEffect(() => setLocalWarning(null), [conn.fileMeta?.id]);
 
   // Guest: when the src swaps (MSE -> blob), land at the synced position.
   useEffect(() => {
@@ -172,38 +202,110 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
   }, [src, isHost]);
 
   // ---- Host: file pick & streaming ----
-  const streamer = useHostStreamer(conn.socket, conn.joined && isHost);
+  const { setFile: setStreamFile, stopAll: stopAllStreams } = useHostStreamer(conn.socket, conn.joined && isHost);
   const guestIds = conn.users.filter((u) => !u.isHost).map((u) => u.id);
   const guestIdsRef = useRef(guestIds);
   guestIdsRef.current = guestIds;
+  const streamToGuestsRef = useRef(conn.streamToGuests);
+  streamToGuestsRef.current = conn.streamToGuests;
+  /** Whether we've told the server we're playing; the host <video> is the source of truth. */
+  const hostPlayingRef = useRef(false);
+  /** After a page reload + re-pick, land on the room's saved position. */
+  const resumeSeekRef = useRef(false);
 
   const pickFile = useCallback(
     async (file: File) => {
+      const current = conn.fileMeta;
+      // Swapping src fires a "pause" that must not be broadcast.
+      hostPlayingRef.current = false;
+      const resuming =
+        !hostSrc && current !== null && current.name === file.name && current.size === file.size;
+      if (resuming) {
+        // Host reloaded and re-picked the same movie: keep the room's position
+        // and only stream to guests that don't already have it.
+        resumeSeekRef.current = true;
+        setHostSrc(URL.createObjectURL(file));
+        setStreamFile(file, current.id, []);
+        conn.socket.emit("host:resume-file");
+        return;
+      }
       const meta = await probeVideoMeta(file).catch(() => ({ duration: 0, width: 0, height: 0 }));
       setHostSrc((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(file);
       });
-      conn.socket.emit("host:file-meta", { name: file.name, size: file.size, ...meta });
-      streamer.setFile(file, guestIdsRef.current);
+      conn.socket.emit(
+        "host:file-meta",
+        { name: file.name, size: file.size, ...meta },
+        (res: { id: string }) =>
+          setStreamFile(file, res.id, streamToGuestsRef.current ? guestIdsRef.current : [])
+      );
     },
-    [conn.socket, streamer]
+    [conn.socket, conn.fileMeta, hostSrc, setStreamFile]
+  );
+
+  const setStreamMode = useCallback(
+    (enabled: boolean) => {
+      if (!enabled) stopAllStreams();
+      conn.socket.emit("host:stream-mode", { enabled });
+    },
+    [conn.socket, stopAllStreams]
   );
 
   // ---- Host controls ----
+  // play/pause only drive the element; its events do the broadcasting, so
+  // pauses from outside these controls (movie ended, PiP window, media keys)
+  // reach guests too instead of leaving them stuck on "Catching up…".
   const emitPlay = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.play().catch(() => {});
-    conn.socket.emit("host:play", { timestamp: v.currentTime });
-  }, [conn.socket]);
+    videoRef.current?.play().catch(() => {});
+  }, []);
 
   const emitPause = useCallback(() => {
+    videoRef.current?.pause();
+  }, []);
+
+  const hasFile = conn.fileMeta !== null;
+  useEffect(() => {
     const v = videoRef.current;
-    if (!v) return;
-    v.pause();
-    conn.socket.emit("host:pause", { timestamp: v.currentTime });
-  }, [conn.socket]);
+    if (!isHost || !v) return;
+    const onPlay = () => {
+      if (hostPlayingRef.current) return;
+      hostPlayingRef.current = true;
+      conn.socket.emit("host:play", { timestamp: v.currentTime });
+    };
+    const onPause = () => {
+      if (!hostPlayingRef.current) return;
+      hostPlayingRef.current = false;
+      conn.socket.emit("host:pause", { timestamp: v.currentTime });
+    };
+    const onLoaded = () => {
+      if (!resumeSeekRef.current) return;
+      resumeSeekRef.current = false;
+      const st = conn.playbackState;
+      if (st) v.currentTime = computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, conn.serverNow());
+    };
+    v.addEventListener("play", onPlay);
+    v.addEventListener("pause", onPause);
+    v.addEventListener("ended", onPause);
+    v.addEventListener("loadedmetadata", onLoaded);
+    return () => {
+      v.removeEventListener("play", onPlay);
+      v.removeEventListener("pause", onPause);
+      v.removeEventListener("ended", onPause);
+      v.removeEventListener("loadedmetadata", onLoaded);
+    };
+  }, [isHost, hasFile, conn.socket, conn.playbackState, conn.serverNow]);
+
+  // Host socket reconnected: the server paused the room during the outage
+  // while our video kept going, so re-assert and let guests resume (RM-08).
+  useEffect(() => {
+    if (!isHost || conn.joinCount < 2) return;
+    const v = videoRef.current;
+    if (v && !v.paused) {
+      hostPlayingRef.current = true;
+      conn.socket.emit("host:play", { timestamp: v.currentTime });
+    }
+  }, [isHost, conn.joinCount, conn.socket]);
 
   const emitSeek = useCallback(
     (t: number) => {
@@ -342,8 +444,42 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
       {!conn.connected && conn.joined && <OverlayMessage>Reconnecting…</OverlayMessage>}
       {/* SP-07 */}
       {catchingUp && <OverlayMessage>Catching up…</OverlayMessage>}
+      {/* Host reloaded the page: the room still has the movie, the browser doesn't */}
+      {isHost && conn.fileMeta && !hostSrc && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Re-select your video to continue</p>
+          <p className="text-sm text-cinema-muted">
+            Pick <span className="text-cinema-text">{conn.fileMeta.name}</span> again to resume where the room left
+            off, or pick a different file to start over.
+          </p>
+          <FilePickButton onPick={pickFile} className={PROMPT_BUTTON}>
+            Choose file
+          </FilePickButton>
+        </OverlayPrompt>
+      )}
       {/* Guest stream startup */}
-      {!isHost && conn.fileMeta && !src && <OverlayMessage>Connecting to host's stream…</OverlayMessage>}
+      {!isHost && conn.fileMeta && !src && conn.streamToGuests && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Connecting to host's stream…</p>
+          <p className="text-sm text-cinema-muted">Already have this movie on your computer?</p>
+          <FilePickButton onPick={pickLocalCopy} className={PROMPT_BUTTON}>
+            Use my own copy
+          </FilePickButton>
+        </OverlayPrompt>
+      )}
+      {/* Host isn't streaming: every guest brings their own copy */}
+      {!isHost && conn.fileMeta && !conn.streamToGuests && !receiver.complete && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Load your copy of the movie</p>
+          <p className="text-sm text-cinema-muted">
+            The host isn't streaming. Everyone plays their own copy of{" "}
+            <span className="text-cinema-text">{conn.fileMeta.name}</span>, kept in sync.
+          </p>
+          <FilePickButton onPick={pickLocalCopy} className={PROMPT_BUTTON}>
+            Choose file
+          </FilePickButton>
+        </OverlayPrompt>
+      )}
       {/* Guest unmute prompt (autoplay policy) */}
       {!isHost && muted && src && playing && (
         <button
@@ -356,8 +492,20 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
       )}
       {/* Transfer progress chip */}
       {!isHost && receiver.totalBytes > 0 && !receiver.complete && (
-        <div className="absolute bottom-20 right-3 z-20 rounded-lg bg-black/60 px-2 py-1 font-mono text-xs text-cinema-text/90">
+        <div className="absolute bottom-20 right-3 z-20 flex items-center gap-2 rounded-lg bg-black/60 px-2 py-1 font-mono text-xs text-cinema-text/90">
           buffering {transferPct}%
+          <FilePickButton
+            onPick={pickLocalCopy}
+            className="cursor-pointer font-sans text-cinema-accent underline"
+            title="Skip the download and play the movie from your own computer"
+          >
+            use my copy
+          </FilePickButton>
+        </div>
+      )}
+      {localWarning && (
+        <div className="absolute left-3 top-3 z-20 max-w-sm rounded-lg bg-black/70 px-2 py-1 text-xs text-yellow-300">
+          {localWarning}
         </div>
       )}
       {receiver.error && !receiver.complete && (
@@ -434,6 +582,17 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
               />
               Buffering gate
             </label>
+            <label
+              className="flex cursor-pointer items-center gap-1"
+              title="Off: viewers load their own copy of the file and nothing is sent from your computer"
+            >
+              <input
+                type="checkbox"
+                checked={conn.streamToGuests}
+                onChange={(e) => setStreamMode(e.target.checked)}
+              />
+              Stream to viewers
+            </label>
             <label className="flex cursor-pointer items-center gap-1" title="Pause everyone if any viewer runs low">
               <input
                 type="checkbox"
@@ -442,19 +601,22 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
               />
               Auto-pause
             </label>
-            <label className="cursor-pointer rounded-lg bg-cinema-surface px-2 py-1 hover:bg-cinema-surface/70">
-              {conn.fileMeta ? "Replace video" : "Load video"}
-              <input
-                type="file"
-                accept="video/mp4,video/webm"
-                className="sr-only"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) pickFile(f);
-                  e.target.value = "";
-                }}
-              />
-            </label>
+            <FilePickButton onPick={pickFile}>{conn.fileMeta ? "Replace video" : "Load video"}</FilePickButton>
+          </div>
+        )}
+        {!isHost && conn.fileMeta && (
+          <div className="flex items-center gap-2 text-xs">
+            {usingLocalCopy && (
+              <span className="rounded-full bg-cinema-surface px-2 py-1 text-cinema-muted" title="Playing from your computer">
+                own copy
+              </span>
+            )}
+            <FilePickButton
+              onPick={pickLocalCopy}
+              title="Play the movie from a file on your computer instead of the host's stream"
+            >
+              {usingLocalCopy ? "Change file" : "Use my own copy"}
+            </FilePickButton>
           </div>
         )}
       </header>
@@ -516,6 +678,17 @@ function RoomInner({ roomId, identity, isHost, hostToken, password }: InnerProps
         )}
         {!isFullscreen && chatPanel}
       </main>
+    </div>
+  );
+}
+
+const PROMPT_BUTTON =
+  "cursor-pointer rounded-lg bg-cinema-accent px-4 py-2 font-semibold text-white hover:bg-cinema-accent/80 focus-within:ring-2 focus-within:ring-white";
+
+function OverlayPrompt({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/70 p-6 text-center">
+      {children}
     </div>
   );
 }

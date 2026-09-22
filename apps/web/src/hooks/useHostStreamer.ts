@@ -22,6 +22,7 @@ interface PeerStream {
  */
 export function useHostStreamer(socket: Socket, joined: boolean) {
   const fileRef = useRef<File | null>(null);
+  const fileIdRef = useRef<string>("");
   const peersRef = useRef<Map<string, PeerStream>>(new Map());
   const generationRef = useRef(0);
   const [activeStreams, setActiveStreams] = useState(0);
@@ -42,6 +43,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
 
   const streamFile = useCallback(async (guestId: string, peer: PeerStream) => {
     const file = fileRef.current;
+    const fileId = fileIdRef.current;
     if (!file) return;
     const myGeneration = peer.generation;
     const dc = peer.dc;
@@ -72,7 +74,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
       });
 
     try {
-      dc.send(JSON.stringify({ type: "meta", name: file.name, size: file.size }));
+      dc.send(JSON.stringify({ type: "meta", fileId, name: file.name, size: file.size }));
       let offset = 0;
       while (offset < file.size) {
         if (!alive()) return;
@@ -179,15 +181,25 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     };
   }, []);
 
-  /** Host picked (or replaced) a file: restart all guest streams (FL-04). */
+  /**
+   * Host picked (or replaced) a file: restart streams to guestIds (FL-04).
+   * Pass no guests when viewers use their own copies; the server can still
+   * request individual streams later via stream:request.
+   */
   const setFile = useCallback(
-    (file: File, guestIds: string[]) => {
+    (file: File, fileId: string, guestIds: string[]) => {
       fileRef.current = file;
+      fileIdRef.current = fileId;
       generationRef.current += 1;
       for (const id of guestIds) openStreamTo(id);
     },
     [openStreamTo]
   );
 
-  return { setFile, activeStreams };
+  /** Streaming switched off: close every guest connection. */
+  const stopAll = useCallback(() => {
+    for (const id of [...peersRef.current.keys()]) teardownPeer(id);
+  }, [teardownPeer]);
+
+  return { setFile, stopAll, activeStreams };
 }

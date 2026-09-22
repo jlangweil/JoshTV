@@ -40,6 +40,15 @@ function requireHost(room: Room, socket: Socket): boolean {
   return room.hostSocketId === socket.id;
 }
 
+/** Ask the host to stream to every guest that doesn't already hold the current file. */
+function requestMissingStreams(io: Server, room: Room): void {
+  if (!room.fileMeta || !room.hostSocketId || !room.streamToGuests) return;
+  for (const u of room.users.values()) {
+    if (u.isHost || room.guestBufferStates.get(u.socketId)?.complete) continue;
+    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: u.socketId });
+  }
+}
+
 export function registerHandlers(io: Server, socket: Socket): void {
   const ctx: SocketCtx = { roomId: null, isHost: false, name: "", color: "", chatTimes: [] };
   ctxBySocket.set(socket.id, ctx);
@@ -66,6 +75,8 @@ export function registerHandlers(io: Server, socket: Socket): void {
         isHost: boolean;
         hostToken?: string;
         password?: string;
+        /** File id the guest already holds (finished download or local copy). */
+        mediaFileId?: string;
       },
       ack?: (res: { ok: boolean; error?: string }) => void
     ) => {
@@ -114,6 +125,7 @@ export function registerHandlers(io: Server, socket: Socket): void {
         serverTime: Date.now(),
         fileMeta: room.fileMeta,
         autoPauseOnBufferLow: room.autoPauseOnBufferLow,
+        streamToGuests: room.streamToGuests,
         hostConnected: room.hostSocketId !== null,
       });
       socket.emit("chat:history", {
@@ -128,8 +140,15 @@ export function registerHandlers(io: Server, socket: Socket): void {
       const sys = systemMessage(room, `${name} joined`);
       io.to(room.roomId).emit("chat:message", sys);
 
-      if (!data.isHost && room.fileMeta && room.hostSocketId) {
-        // Ask the host to open a WebRTC stream toward this guest.
+      if (
+        !data.isHost &&
+        room.fileMeta &&
+        room.hostSocketId &&
+        room.streamToGuests &&
+        data.mediaFileId !== room.fileMeta.id
+      ) {
+        // Ask the host to open a WebRTC stream toward this guest. Guests that
+        // reconnect already holding the file (download or local copy) skip it.
         io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id });
       }
     }
@@ -189,26 +208,52 @@ export function registerHandlers(io: Server, socket: Socket): void {
   });
 
   // ---- File metadata (FL-03/FL-04) ----
-  socket.on("host:file-meta", (data: { name: string; size: number; duration: number; width: number; height: number }) => {
+  socket.on(
+    "host:file-meta",
+    (
+      data: { name: string; size: number; duration: number; width: number; height: number },
+      ack?: (res: { id: string }) => void
+    ) => {
+      const room = currentRoom();
+      if (!room || !requireHost(room, socket)) return;
+      const replacing = room.fileMeta !== null;
+      room.fileMeta = {
+        id: randomUUID(),
+        name: String(data?.name ?? "video.mp4").slice(0, 200),
+        size: Number(data?.size) || 0,
+        duration: Number(data?.duration) || 0,
+        width: Number(data?.width) || 0,
+        height: Number(data?.height) || 0,
+      };
+      room.playbackState = { playing: false, currentTime: 0, updatedAt: Date.now(), speed: 1 };
+      room.guestBufferStates.clear();
+      touch(room);
+      ack?.({ id: room.fileMeta.id });
+      io.to(room.roomId).emit("file:meta", { fileMeta: room.fileMeta, serverTime: Date.now() });
+      io.to(room.roomId).emit("buffer:states", { states: bufferStatesPayload(room) });
+      const sys = systemMessage(
+        room,
+        replacing ? `Host changed the video: ${room.fileMeta.name}` : `Now playing: ${room.fileMeta.name}`
+      );
+      io.to(room.roomId).emit("chat:message", sys);
+    }
+  );
+
+  // Host reloaded the page and re-picked the same file: keep the room's
+  // position and only stream to guests that don't already have it.
+  socket.on("host:resume-file", () => {
     const room = currentRoom();
     if (!room || !requireHost(room, socket)) return;
-    const replacing = room.fileMeta !== null;
-    room.fileMeta = {
-      name: String(data?.name ?? "video.mp4").slice(0, 200),
-      size: Number(data?.size) || 0,
-      duration: Number(data?.duration) || 0,
-      width: Number(data?.width) || 0,
-      height: Number(data?.height) || 0,
-    };
-    room.playbackState = { playing: false, currentTime: 0, updatedAt: Date.now(), speed: 1 };
-    room.guestBufferStates.clear();
-    touch(room);
-    io.to(room.roomId).emit("file:meta", { fileMeta: room.fileMeta, serverTime: Date.now() });
-    const sys = systemMessage(
-      room,
-      replacing ? `Host changed the video: ${room.fileMeta.name}` : `Now playing: ${room.fileMeta.name}`
-    );
-    io.to(room.roomId).emit("chat:message", sys);
+    requestMissingStreams(io, room);
+  });
+
+  // Off = "everyone brings their own copy": the host streams to no one.
+  socket.on("host:stream-mode", (data: { enabled: boolean }) => {
+    const room = currentRoom();
+    if (!room || !requireHost(room, socket)) return;
+    room.streamToGuests = Boolean(data?.enabled);
+    io.to(room.roomId).emit("room:stream-mode", { enabled: room.streamToGuests });
+    requestMissingStreams(io, room);
   });
 
   socket.on("host:auto-pause", (data: { enabled: boolean }) => {
@@ -219,17 +264,30 @@ export function registerHandlers(io: Server, socket: Socket): void {
   });
 
   // ---- Guest buffer reports (BF-02/BF-03) ----
-  socket.on("guest:buffer", (data: { aheadSeconds: number; ready: boolean; receivedBytes: number; complete: boolean }) => {
-    const room = currentRoom();
-    if (!room || ctx.isHost) return;
-    room.guestBufferStates.set(socket.id, {
-      aheadSeconds: Number(data?.aheadSeconds) || 0,
-      ready: Boolean(data?.ready),
-      receivedBytes: Number(data?.receivedBytes) || 0,
-      complete: Boolean(data?.complete),
-    });
-    io.to(room.roomId).emit("buffer:states", { states: bufferStatesPayload(room) });
-  });
+  socket.on(
+    "guest:buffer",
+    (data: {
+      fileId: string | null;
+      aheadSeconds: number;
+      ready: boolean;
+      receivedBytes: number;
+      complete: boolean;
+      local: boolean;
+    }) => {
+      const room = currentRoom();
+      if (!room || ctx.isHost) return;
+      // Reports about a replaced file would falsely open the buffering gate.
+      if (!room.fileMeta || data?.fileId !== room.fileMeta.id) return;
+      room.guestBufferStates.set(socket.id, {
+        aheadSeconds: Number(data?.aheadSeconds) || 0,
+        ready: Boolean(data?.ready),
+        receivedBytes: Number(data?.receivedBytes) || 0,
+        complete: Boolean(data?.complete),
+        local: Boolean(data?.local),
+      });
+      io.to(room.roomId).emit("buffer:states", { states: bufferStatesPayload(room) });
+    }
+  );
 
   // ---- Chat (CH-*) ----
   socket.on("chat:send", (data: { text: string }) => {

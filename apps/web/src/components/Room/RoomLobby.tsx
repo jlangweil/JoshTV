@@ -27,7 +27,7 @@ export function RoomLobby({ isHost, users, bufferStates, onPickFile }: Props) {
         >
           <span className="font-display text-2xl">Drop your MP4 here or click to browse</span>
           <span className="text-sm text-cinema-muted">
-            The file never leaves your browser except as encrypted peer-to-peer chunks.
+            The file never leaves your browser except as encrypted peer-to-peer chunks. Viewers who already have it can play their own copy instead.
           </span>
           <input
             type="file"

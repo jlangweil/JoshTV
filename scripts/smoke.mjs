@@ -73,9 +73,14 @@ const guestState = await guestStatePromise;
 check("guest receives sync:state", guestState.playbackState?.playing === false);
 
 // Host file meta → guest gets file:meta and host gets stream:request when guest joins later
-host.emit("host:file-meta", { name: "movie.mp4", size: 1000, duration: 120, width: 1920, height: 1080 });
+const fileAckPromise = new Promise((resolve) =>
+  host.emit("host:file-meta", { name: "movie.mp4", size: 1000, duration: 120, width: 1920, height: 1080 }, resolve)
+);
 const fm = await once(guest, "file:meta");
 check("guest receives file:meta", fm.fileMeta?.name === "movie.mp4");
+const fileAck = await fileAckPromise;
+check("host:file-meta acks the file id", typeof fileAck.id === "string" && fileAck.id === fm.fileMeta.id);
+const fileId = fileAck.id;
 
 // Late guest triggers stream:request to host
 const late = io(BASE, { transports: ["websocket"] });
@@ -118,11 +123,65 @@ host.off("chat:message", counter);
 check("chat rate limited to 3/sec", received === 3);
 
 // Buffer reports reach host
+let staleRelayed = false;
+const staleWatch = () => (staleRelayed = true);
+host.on("buffer:states", staleWatch);
+guest.emit("guest:buffer", { fileId: "old-file", aheadSeconds: 99, ready: true, receivedBytes: 1000, complete: true });
+await new Promise((r) => setTimeout(r, 300));
+host.off("buffer:states", staleWatch);
+check("buffer report for a replaced file ignored", staleRelayed === false);
+
 const bufPromise = once(host, "buffer:states");
-guest.emit("guest:buffer", { aheadSeconds: 2.5, ready: false, receivedBytes: 100, complete: false });
+guest.emit("guest:buffer", { fileId, aheadSeconds: 2.5, ready: false, receivedBytes: 100, complete: false, local: false });
 const buf = await bufPromise;
 const states = Object.values(buf.states);
 check("buffer:states relayed", states.some((s) => s.aheadSeconds === 2.5));
+
+// Guest with a local copy reports complete; a reconnect holding the file skips streaming.
+const localBufPromise = once(host, "buffer:states");
+late.emit("guest:buffer", { fileId, aheadSeconds: 99999, ready: true, receivedBytes: 1000, complete: true, local: true });
+const localBuf = await localBufPromise;
+check("local-copy flag relayed", localBuf.states[late.id]?.local === true);
+
+async function joinGuest(name, extra = {}) {
+  const s = io(BASE, { transports: ["websocket"] });
+  await once(s, "connect");
+  await new Promise((resolve) =>
+    s.emit("room:join", { roomId, name, color: "#BAFFC9", isHost: false, ...extra }, resolve)
+  );
+  return s;
+}
+async function receivesStreamRequest(action, ms = 400) {
+  let got = [];
+  const onReq = (d) => got.push(d.guestSocketId);
+  host.on("stream:request", onReq);
+  const result = await action();
+  await new Promise((r) => setTimeout(r, ms));
+  host.off("stream:request", onReq);
+  return { got, result };
+}
+
+const holder = await receivesStreamRequest(() => joinGuest("Holder", { mediaFileId: fileId }));
+check("guest rejoining with the file gets no stream:request", holder.got.length === 0);
+holder.result.disconnect();
+
+// Stream mode off: nobody gets streamed to.
+const modePromise = once(guest, "room:stream-mode");
+host.emit("host:stream-mode", { enabled: false });
+check("room:stream-mode broadcast", (await modePromise).enabled === false);
+const byo = await receivesStreamRequest(() => joinGuest("BYO"));
+check("stream mode off: new guest gets no stream:request", byo.got.length === 0);
+
+// Back on: host is asked to stream to exactly the guests that lack the file.
+const reOn = await receivesStreamRequest(async () => host.emit("host:stream-mode", { enabled: true }));
+check(
+  "stream mode on: requests only guests without the file",
+  reOn.got.includes(guest.id) && reOn.got.includes(byo.result.id) && !reOn.got.includes(late.id)
+);
+byo.result.disconnect();
+
+const resumed = await receivesStreamRequest(async () => host.emit("host:resume-file"));
+check("host:resume-file skips guests that have the file", resumed.got.includes(guest.id) && !resumed.got.includes(late.id));
 
 // RTC signaling relay host -> guest
 const offerPromise = once(late, "rtc:offer");

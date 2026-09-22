@@ -46,7 +46,8 @@ export class StreamAssembler {
   private disposed = false;
 
   constructor(
-    private video: HTMLVideoElement,
+    /** Getter, not the element: the <video> may mount after the stream starts. */
+    private getVideo: () => HTMLVideoElement | null,
     private cb: AssemblerCallbacks
   ) {}
 
@@ -115,8 +116,11 @@ export class StreamAssembler {
   private handleReady(info: MP4Info): void {
     this.info = info;
     if (!this.box) return;
-    for (const track of info.tracks) {
-      this.box.setSegmentOptions(track.id, null, { nbSamples: 100 });
+    // One video + one audio track only: MSE rejects text/chapter tracks and
+    // browsers allow a single SourceBuffer per type, so extra tracks (subtitles,
+    // commentary audio) would otherwise sink the whole progressive path.
+    for (const track of [info.videoTracks[0], info.audioTracks[0]]) {
+      if (track) this.box.setSegmentOptions(track.id, null, { nbSamples: 100 });
     }
     const initSegs = this.box.initializeSegmentation();
     this.pendingInit = initSegs.map((s) => ({ id: s.id, buffer: s.buffer }));
@@ -178,7 +182,7 @@ export class StreamAssembler {
   }
 
   private evictBehindPlayhead(tb: TrackBuffer): void {
-    const cutoff = Math.max(0, this.video.currentTime - 30);
+    const cutoff = Math.max(0, (this.getVideo()?.currentTime ?? 0) - 30);
     if (cutoff <= 0.5) {
       // Nothing to evict — stall MSE; the blob path will rescue playback.
       tb.failed = true;

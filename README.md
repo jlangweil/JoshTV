@@ -3,7 +3,8 @@
 Host a movie night: one host loads a **local MP4** and up to **10 viewers** watch it in
 perfect sync, with real-time chat, floating emoji reactions, and a fullscreen mode that
 keeps the chat reachable. The file never touches a server — it streams peer-to-peer
-from the host's browser over WebRTC DataChannels.
+from the host's browser over WebRTC DataChannels, or each viewer plays their own local
+copy and only the playback state is synced.
 
 ## Stack
 
@@ -40,7 +41,7 @@ npm start          # serves API, sockets, AND the built web app on :3001
 
 ```sh
 node apps/server/dist/index.js &   # or npm start
-node scripts/smoke.mjs             # 18 protocol checks (join, sync, chat, RTC relay…)
+node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC relay, own-copy mode…)
 ```
 
 ## How synchronization works
@@ -68,12 +69,31 @@ node scripts/smoke.mjs             # 18 protocol checks (join, sync, chat, RTC r
 - Non-faststart MP4s (moov at end) can't remux progressively: guests then wait for the
   full transfer and play from the blob (the "Buffering gate" makes this seamless).
 - Reconnects use exponential backoff 500ms → 8s (BF-06); on rejoin the server re-sends
-  full state and asks the host to re-open the stream (BF-07).
+  full state and asks the host to re-open the stream (BF-07) — unless the guest already
+  holds the whole file, in which case nothing is re-sent.
+
+## Own-copy mode (local file as the source)
+
+If viewers already have the movie, nothing needs to stream:
+
+- **Any viewer** can click **Use my own copy** (header, the "Connecting…" overlay, or the
+  buffering chip) and pick the file from their computer. Their stream is dropped and they
+  play the local file, still driven by the host's play/pause/seek/speed.
+- **The host** can untick **Stream to viewers**: nothing is sent from the host's machine
+  and every viewer is prompted to load their own copy. Ticking it again streams only to
+  viewers who don't have the file yet.
+- Copies don't need to be byte-identical. If the sizes differ, the guest's file is probed
+  and a warning shows when its duration is off by more than 2s (likely a different cut).
+- Each load gets a server-assigned file id; buffer reports and streams are tagged with it,
+  so a guest's stale media is dropped when the host replaces the video.
+- If the host reloads the page, re-picking the same file resumes the room at its saved
+  position instead of restarting everyone.
 
 ## Feature checklist
 
 - Rooms: 6-char codes, optional password, 12h expiry, 10-guest cap, host-token auth
 - Host disconnect → 30s grace overlay; auto-resume on reconnect (RM-07/08)
+- Own-copy mode: viewers can play a local copy; host can turn streaming off entirely
 - Buffering gate (SP-10): Play disabled until every viewer reports `readyState ≥ 3`
 - Auto-pause on buffer-low toggle (BF-04) with per-guest green/yellow/red dots (BF-03)
 - Guests: read-only seek bar, ✋ pause requests the host can accept/dismiss (SP-09)
@@ -139,7 +159,8 @@ relay bandwidth applies there.
 
 - Streaming is WebRTC-only; there is no server-relay fallback for networks where
   NAT traversal fails (would need a TURN server — add one to `RTC_CONFIG`).
-- A guest who reconnects re-downloads the file from the start.
+- A guest who reconnects mid-download re-downloads the file from the start (finished
+  downloads and local copies are kept).
 - Host seeking far ahead of what guests have received shows "Catching up…" until the
   sequential transfer reaches that position.
 - In-memory room state: restarting the server drops rooms (Redis adapter is the

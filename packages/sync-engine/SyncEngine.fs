@@ -20,6 +20,13 @@ type SyncEvent =
 let initialState: PlaybackState =
     { Playing = false; CurrentTime = 0.0; Speed = 1.0; UpdatedAt = 0.0 }
 
+/// Where playback should be right now, given the current server clock.
+let computeExpectedTime (state: PlaybackState) (serverNow: float) : float =
+    if state.Playing then
+        state.CurrentTime + max 0.0 (serverNow - state.UpdatedAt) / 1000.0 * state.Speed
+    else
+        state.CurrentTime
+
 let applyEvent (state: PlaybackState) (evt: SyncEvent) : PlaybackState =
     match evt with
     | Play(ts, server) -> { state with Playing = true; CurrentTime = ts; UpdatedAt = server }
@@ -27,14 +34,7 @@ let applyEvent (state: PlaybackState) (evt: SyncEvent) : PlaybackState =
     | Seek(target, server) -> { state with CurrentTime = target; UpdatedAt = server }
     | SpeedChange(speed, server) ->
         // Re-anchor so position stays continuous across the speed change.
-        { state with Speed = speed; UpdatedAt = server }
-
-/// Where playback should be right now, given the current server clock.
-let computeExpectedTime (state: PlaybackState) (serverNow: float) : float =
-    if state.Playing then
-        state.CurrentTime + max 0.0 (serverNow - state.UpdatedAt) / 1000.0 * state.Speed
-    else
-        state.CurrentTime
+        { state with CurrentTime = computeExpectedTime state server; Speed = speed; UpdatedAt = server }
 
 let driftSeconds (expected: float) (actual: float) : float = abs (expected - actual)
 

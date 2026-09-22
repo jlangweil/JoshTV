@@ -36,6 +36,7 @@ export function createRoom(password?: string): Room {
     subtitleVtt: null,
     fileMeta: null,
     autoPauseOnBufferLow: false,
+    streamToGuests: true,
     lastActivity: Date.now(),
     hostGraceTimer: null,
   };

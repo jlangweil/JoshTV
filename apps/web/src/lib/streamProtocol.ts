@@ -11,6 +11,8 @@ export const LOW_WATER_MARK = 1 * 1024 * 1024; // resume below this
 
 export interface MetaMessage {
   type: "meta";
+  /** FileMeta.id of the file being streamed. */
+  fileId: string;
   name: string;
   size: number;
 }
