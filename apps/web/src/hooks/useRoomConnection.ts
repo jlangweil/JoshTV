@@ -18,6 +18,12 @@ export interface RoomConnection {
   /** Increments on every successful join, including reconnects. */
   joinCount: number;
   joinError: string | null;
+  /** Host: another live tab is hosting this room; join was declined until the person chooses. */
+  hostElsewhere: boolean;
+  /** Host: another tab took over hosting; this one is now just watching. */
+  replaced: boolean;
+  /** Host: take hosting over from whichever tab has it. */
+  takeOverHosting: () => void;
   users: RoomUser[];
   chat: ChatMessage[];
   playbackState: PlaybackState | null;
@@ -78,6 +84,12 @@ export function useRoomConnection({
   const [joined, setJoined] = useState(false);
   const [joinCount, setJoinCount] = useState(0);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [hostElsewhere, setHostElsewhere] = useState(false);
+  const [replaced, setReplaced] = useState(false);
+  /** This tab has been the host: a reconnect reclaims hosting without asking. */
+  const hostedBeforeRef = useRef(false);
+  const replacedRef = useRef(false);
+  const joinRef = useRef<(takeover: boolean) => void>(() => {});
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const [playbackState, setPlaybackState] = useState<PlaybackState | null>(null);
@@ -125,9 +137,7 @@ export function useRoomConnection({
       }
     };
 
-    const onConnect = () => {
-      setConnected(true);
-      runSync();
+    const join = (takeover: boolean) =>
       socket.emit(
         "room:join",
         {
@@ -137,17 +147,32 @@ export function useRoomConnection({
           isHost,
           hostToken,
           mediaFileId: mediaFileIdRef?.current ?? undefined,
+          takeover,
         },
         (res: { ok: boolean; error?: string }) => {
           if (res.ok) {
             setJoined(true);
             setJoinCount((n) => n + 1);
             setJoinError(null);
+            setHostElsewhere(false);
+            if (isHost) {
+              hostedBeforeRef.current = true;
+              replacedRef.current = false;
+              setReplaced(false);
+            }
+          } else if (res.error === "host-elsewhere") {
+            setHostElsewhere(true);
           } else {
             setJoinError(res.error ?? "Could not join room");
           }
         }
       );
+    joinRef.current = join;
+
+    const onConnect = () => {
+      setConnected(true);
+      runSync();
+      join(isHost && hostedBeforeRef.current && !replacedRef.current);
     };
 
     const onDisconnect = () => setConnected(false);
@@ -224,6 +249,12 @@ export function useRoomConnection({
       "room:stream-mode": (d) => setStreamToGuests(Boolean(d.enabled)),
       "caption:update": (d) => setSubtitleVtt(d.vttContent),
       "room:closed": () => setJoinError("Room expired"),
+      // Server checking this host tab is alive before letting another tab host.
+      "host:ping": (ack?: () => void) => ack?.(),
+      "host:replaced": () => {
+        replacedRef.current = true;
+        setReplaced(true);
+      },
     };
 
     for (const [event, handler] of Object.entries(handlers)) socket.on(event, handler);
@@ -239,6 +270,44 @@ export function useRoomConnection({
     };
   }, [socket]);
 
+  // iOS freezes backgrounded pages (switching apps, locking the screen) and
+  // silently kills their sockets; the client can keep believing it's
+  // connected until a ping timeout ~45s later. On return, probe the socket
+  // and reconnect at once if it doesn't answer.
+  useEffect(() => {
+    let probing = false;
+    const check = () => {
+      if (document.visibilityState !== "visible" || probing) return;
+      if (!socket.connected) {
+        socket.connect();
+        return;
+      }
+      probing = true;
+      socket.timeout(3000).emit("clock:ping", { clientTime: Date.now() }, (err: Error | null) => {
+        probing = false;
+        if (err) {
+          socket.disconnect();
+          socket.connect();
+        }
+      });
+    };
+    // Restored from Safari's back/forward cache: sockets and peer
+    // connections are dead and React state is stale — start fresh.
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) window.location.reload();
+      else check();
+    };
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("online", check);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("online", check);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [socket]);
+
+  const takeOverHosting = useCallback(() => joinRef.current(true), []);
   const sendChat = useCallback((text: string) => socket.emit("chat:send", { text }), [socket]);
   const sendReaction = useCallback((emoji: string) => socket.emit("reaction:send", { emoji }), [socket]);
   const requestPause = useCallback(() => socket.emit("pause:request"), [socket]);
@@ -253,6 +322,9 @@ export function useRoomConnection({
     joined,
     joinCount,
     joinError,
+    hostElsewhere,
+    replaced,
+    takeOverHosting,
     users,
     chat,
     playbackState,

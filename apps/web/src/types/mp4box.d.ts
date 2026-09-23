@@ -24,6 +24,7 @@ declare module "mp4box" {
     size: number;
     dts: number;
     cts: number;
+    duration: number;
     timescale: number;
     is_sync: boolean;
   }
@@ -47,6 +48,8 @@ declare module "mp4box" {
     /** Moves segmentation to the sync sample at/before time; returns the byte offset needed next. */
     seek(time: number, useRap: boolean): { offset: number; time: number };
     getTrackById(id: number): { samples?: MP4Sample[] } | undefined;
+    /** Frees sample data (and fully consumed input buffers) before sampleNum. */
+    releaseUsedSamples(trackId: number, sampleNum: number): void;
   }
 
   export function createFile(): ISOFile;

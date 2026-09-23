@@ -9,6 +9,7 @@ import {
   encodeChunk,
   parseControl,
 } from "../lib/streamProtocol";
+import { diag } from "../lib/diag";
 
 interface ByteRange {
   start: number;
@@ -91,8 +92,8 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
       if (msg?.type !== "range") return;
       const start = Math.max(0, Math.floor(Number(msg.start) || 0));
       const end = Math.min(file.size, Math.floor(Number(msg.end) || 0));
-      if (end <= start) return;
-      peer.job = { start, end };
+      // An empty range means "stop for now" (a streaming-only guest is far enough ahead).
+      peer.job = end > start ? { start, end } : null;
       peer.wake?.();
     };
     dc.addEventListener("close", () => peer.wake?.());
@@ -128,7 +129,12 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
 
   const openStreamTo = useCallback(
     async (guestId: string) => {
-      if (!fileRef.current) return;
+      const tag = `stream to ${guestId.slice(0, 5)}`;
+      if (!fileRef.current) {
+        diag(`${tag}: requested, but no file is loaded in this tab`);
+        return;
+      }
+      diag(`${tag}: opening`);
       teardownPeer(guestId);
 
       const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -142,12 +148,16 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         if (e.candidate) socket.emit("rtc:ice", { targetSocketId: guestId, candidate: e.candidate });
       };
       pc.onconnectionstatechange = () => {
+        diag(`${tag}: ${pc.connectionState}`);
         if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
           // The guest re-requests a stream after its own reconnect logic.
           if (peersRef.current.get(guestId) === peer) teardownPeer(guestId);
         }
       };
-      dc.onopen = () => streamFile(guestId, peer);
+      dc.onopen = () => {
+        diag(`${tag}: channel open, sending`);
+        streamFile(guestId, peer);
+      };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);

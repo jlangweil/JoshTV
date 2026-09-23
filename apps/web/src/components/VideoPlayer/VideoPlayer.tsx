@@ -1,4 +1,4 @@
-import { ReactNode, RefObject, useEffect, useRef, useState } from "react";
+import { ReactNode, RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Controls } from "./Controls";
 import { SyncIndicator } from "./SyncIndicator";
 import { ReactionOverlay } from "../Reactions/ReactionOverlay";
@@ -6,6 +6,8 @@ import { Reaction } from "../../types";
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement>;
+  /** Required by ManagedMediaSource (iPhone), which won't open while AirPlay is possible. */
+  disableRemotePlayback?: boolean;
   containerRef: RefObject<HTMLDivElement>;
   src: string | null;
   subtitleUrl: string | null;
@@ -47,6 +49,12 @@ export function VideoPlayer(p: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.playing]);
 
+  // Layout effect: must be set before the element starts loading the new src.
+  useLayoutEffect(() => {
+    const v = p.videoRef.current;
+    if (v) v.disableRemotePlayback = Boolean(p.disableRemotePlayback);
+  }, [p.videoRef, p.disableRemotePlayback, p.src]);
+
   // Live position readout for the seek bar.
   useEffect(() => {
     const interval = setInterval(() => {
@@ -72,7 +80,6 @@ export function VideoPlayer(p: Props) {
           playsInline
           preload="auto"
           muted={p.muted}
-          crossOrigin="anonymous"
         >
           {p.subtitleUrl && (
             <track key={p.subtitleUrl} src={p.subtitleUrl} kind="subtitles" label="Subtitles" default />

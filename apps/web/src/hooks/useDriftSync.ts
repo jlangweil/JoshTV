@@ -14,6 +14,12 @@ import {
 const CORRECTION_COOLDOWN_MS = 2500;
 /** Resume from "catching up" only with this much media buffered ahead. */
 const RESUME_BUFFER_S = 2;
+/**
+ * While catching up the video is paused and the room keeps moving, so aim a
+ * little ahead: the room then arrives at the parked frame, instead of every
+ * seek landing behind again.
+ */
+const CATCH_UP_LEAD_S = 0.4;
 
 /**
  * Guest-side drift correction loop (SP-05..SP-07), driven by the Fable
@@ -24,7 +30,7 @@ export function useDriftSync(
   playbackState: PlaybackState | null,
   serverNow: () => number,
   enabled: boolean,
-  /** Browser refused unmuted playback (no user interaction yet). */
+  /** Browser refused playback (no user interaction yet, or iOS Low Power Mode). */
   onAutoplayBlocked?: (video: HTMLVideoElement) => void
 ): { catchingUp: boolean } {
   const [catchingUp, setCatchingUp] = useState(false);
@@ -38,7 +44,7 @@ export function useDriftSync(
 
     const tryPlay = (video: HTMLVideoElement) => {
       video.play().catch((e) => {
-        if ((e as DOMException)?.name === "NotAllowedError" && !video.muted) onBlockedRef.current?.(video);
+        if ((e as DOMException)?.name === "NotAllowedError") onBlockedRef.current?.(video);
       });
     };
 
@@ -90,8 +96,12 @@ export function useDriftSync(
         if (video.readyState >= 3 && caughtUp(expected, actual) && ahead >= RESUME_BUFFER_S) {
           setCatching(false);
           tryPlay(video);
-        } else if (driftSeconds(expected, actual) > 1.0 && canCorrect) {
-          correct(expected);
+        } else if (driftSeconds(expected, actual) > 0.5) {
+          // Paused anyway, so re-seeking is harmless: do it as soon as the
+          // target is buffered (e.g. the stream just delivered it, or an iPad
+          // is back from the background) rather than waiting out the cooldown.
+          const target = expected + CATCH_UP_LEAD_S;
+          if (canCorrect || isBufferedAt(video.buffered, target)) correct(target);
         }
         return;
       }
@@ -115,4 +125,11 @@ export function useDriftSync(
   }, [videoRef, playbackState, serverNow, enabled]);
 
   return { catchingUp };
+}
+
+function isBufferedAt(ranges: TimeRanges, t: number): boolean {
+  for (let i = 0; i < ranges.length; i++) {
+    if (ranges.start(i) <= t && ranges.end(i) >= t + RESUME_BUFFER_S) return true;
+  }
+  return false;
 }

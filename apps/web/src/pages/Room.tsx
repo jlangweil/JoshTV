@@ -6,6 +6,10 @@ import { useGuestReceiver } from "../hooks/useGuestReceiver";
 import { useDriftSync } from "../hooks/useDriftSync";
 import { useBufferReporter } from "../hooks/useBufferReporter";
 import { useFullscreen } from "../hooks/useFullscreen";
+import { useWakeLock } from "../hooks/useWakeLock";
+import { togglePictureInPicture } from "../lib/platform";
+import { attachDiag, diag, leaveBreadcrumb, markCleanExit, mb, takeStartupCrashReport } from "../lib/diag";
+import { storageCapsReady } from "../lib/OpfsStore";
 import { Identity, loadIdentity, saveIdentity, loadHostToken } from "../lib/identity";
 import { getRoomInfo } from "../lib/api";
 import { probeVideoMeta } from "../lib/mp4Meta";
@@ -26,7 +30,9 @@ export default function RoomPage() {
   const [identity, setIdentity] = useState<Identity | null>(() => loadIdentity());
   const [roomCheck, setRoomCheck] = useState<"loading" | "missing" | "ok">("loading");
   const hostToken = useMemo(() => loadHostToken(normalizedId), [normalizedId]);
-  const isHost = hostToken !== null;
+  // A host's second tab can choose to just watch (see RoomInner's hostElsewhere).
+  const [watchAsViewer, setWatchAsViewer] = useState(false);
+  const isHost = hostToken !== null && !watchAsViewer;
 
   useEffect(() => {
     let cancelled = false;
@@ -76,10 +82,13 @@ export default function RoomPage() {
 
   return (
     <RoomInner
+      // Switching role starts a fresh connection with the other role's hooks.
+      key={isHost ? "host" : "viewer"}
       roomId={normalizedId}
       identity={identity}
       isHost={isHost}
-      hostToken={hostToken}
+      hostToken={isHost ? hostToken : null}
+      onWatchAsViewer={() => setWatchAsViewer(true)}
     />
   );
 }
@@ -95,15 +104,18 @@ interface InnerProps {
   identity: Identity;
   isHost: boolean;
   hostToken: string | null;
+  onWatchAsViewer: () => void;
 }
 
-function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
+function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: InnerProps) {
   // Guest: id of the file we fully hold, so a reconnect doesn't re-stream it.
   const mediaFileIdRef = useRef<string | null>(null);
   const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef });
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef);
+  const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef, videoRef);
+  // Don't let the iPad dim and lock mid-movie (locking suspends the page).
+  useWakeLock(Boolean(conn.playbackState?.playing));
 
   // ---- Media sources ----
   const [hostSrc, setHostSrc] = useState<string | null>(null);
@@ -119,11 +131,100 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     conn.joined && !isHost,
     videoRef,
     conn.fileMeta?.id ?? null,
-    getRoomTime
+    getRoomTime,
+    conn.streamToGuests && conn.hostConnected
   );
   mediaFileIdRef.current = receiver.complete ? receiver.fileId : null;
   const src = isHost ? hostSrc : receiver.src;
   const usingLocalCopy = receiver.mode === "local";
+
+  // ---- Remote diagnostics (see lib/diag.ts) ----
+  const crumbRef = useRef("");
+  crumbRef.current =
+    `${isHost ? "host" : "guest"} src=${src ? (isHost ? "file" : receiver.mode) : "none"}` +
+    (isHost ? "" : ` storage=${receiver.streamingOnly ? "window" : "full"} got=${mb(receiver.receivedBytes)}/${mb(receiver.totalBytes)}`) +
+    ` playing=${Boolean(conn.playbackState?.playing)}`;
+  useEffect(() => attachDiag(conn.socket), [conn.socket]);
+  useEffect(() => {
+    if (!conn.joined) return;
+    storageCapsReady.then((caps) =>
+      diag(
+        `joined as ${isHost ? "host" : "guest"} | ${navigator.userAgent} | opfs=${caps.opfs} free=${mb(caps.freeBytes)}`
+      )
+    );
+    const crashReport = takeStartupCrashReport();
+    if (crashReport) {
+      diag(
+        `previous page ended abruptly ${Math.round((Date.now() - crashReport.at) / 1000)}s before this load ` +
+          `(tab crash / killed by the OS) while: ${crashReport.state}`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn.joined]);
+  useEffect(() => {
+    const write = () => {
+      const v = videoRef.current;
+      leaveBreadcrumb(
+        roomId,
+        `${crumbRef.current} t=${v ? v.currentTime.toFixed(0) : "-"} visible=${document.visibilityState === "visible"}`
+      );
+    };
+    const timer = setInterval(write, 3000);
+    const onVisibility = () => {
+      diag(`page ${document.visibilityState}`);
+      write();
+    };
+    const onError = (e: ErrorEvent) => diag(`js error: ${e.message} @ ${e.filename}:${e.lineno}`);
+    const onRejection = (e: PromiseRejectionEvent) => diag(`unhandled rejection: ${String(e.reason)}`);
+    window.addEventListener("pagehide", markCleanExit);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("pagehide", markCleanExit);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, [roomId]);
+  // iOS can tear down a backgrounded page's video decoder ("Media failed to
+  // decode"). Streaming (MSE) pipelines are rebuilt by the StreamAssembler;
+  // a plain file (finished download, own copy, the host's file) just needs
+  // reloading, once the page is visible again. The loadedmetadata handlers
+  // then put it back at the room's position.
+  const receiverModeRef = useRef(receiver.mode);
+  receiverModeRef.current = receiver.mode;
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    let pending = false;
+    const reload = () => {
+      pending = false;
+      diag("reloading the video after an error");
+      if (isHost) {
+        hostPlayingRef.current = false; // the reload's "pause" isn't a real pause
+        resumeSeekRef.current = true;
+      }
+      v.load();
+    };
+    const onVideoError = () => {
+      diag(`video error: code=${v.error?.code} ${v.error?.message ?? ""} src=${v.currentSrc.slice(0, 5)}`);
+      if (!isHost && receiverModeRef.current === "mse") return;
+      if (document.visibilityState === "visible") reload();
+      else pending = true;
+    };
+    const onVisible = () => {
+      if (pending && document.visibilityState === "visible") reload();
+    };
+    v.addEventListener("error", onVideoError);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      v.removeEventListener("error", onVideoError);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src, isHost]);
 
   // ---- Local-only audio (PC-03/PC-04) ----
   const [volume, setVolume] = useState(1);
@@ -139,28 +240,60 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
   // Everyone starts with sound on. Browsers refuse unmuted playback until the
   // viewer has interacted with the page (e.g. a returning guest who opened the
   // link and went straight in), so fall back to muted to keep the picture in
-  // sync, and turn sound back on at their first click or key press.
+  // sync, and turn sound back on at their first tap, click or key press.
+  // iOS Low Power Mode goes further and refuses even muted autoplay; then
+  // nothing can play until a tap, so say so.
   const autoMutedRef = useRef(false);
+  const playBlockedRef = useRef(false);
+  const [playBlocked, setPlayBlocked] = useState(false);
+  const markPlayBlocked = useCallback((blocked: boolean) => {
+    playBlockedRef.current = blocked;
+    setPlayBlocked(blocked);
+  }, []);
   const onAutoplayBlocked = useCallback((v: HTMLVideoElement) => {
+    const markBlocked = () => markPlayBlocked(true);
+    if (v.muted) return markBlocked();
     autoMutedRef.current = true;
     v.muted = true;
     setMuted(true);
-    v.play().catch(() => {});
-  }, []);
+    v.play().catch(markBlocked);
+  }, [markPlayBlocked]);
   useEffect(() => {
-    const unmute = () => {
-      if (!autoMutedRef.current) return;
-      autoMutedRef.current = false;
-      if (videoRef.current) videoRef.current.muted = false;
-      setMuted(false);
+    const v = videoRef.current;
+    if (!v) return;
+    const onPlaying = () => markPlayBlocked(false);
+    v.addEventListener("playing", onPlaying);
+    return () => v.removeEventListener("playing", onPlaying);
+  }, [src, markPlayBlocked]);
+  useEffect(() => {
+    const onGesture = (e: Event) => {
+      // The mute button / volume slider handle their own first tap; unmuting
+      // here as well would make that tap toggle sound straight back off.
+      if ((e.target as Element | null)?.closest?.("[data-audio-control]")) return;
+      const v = videoRef.current;
+      if (autoMutedRef.current) {
+        autoMutedRef.current = false;
+        if (v) v.muted = false;
+        setMuted(false);
+      }
+      // Must start inside the gesture itself for iOS to allow it. Clear the
+      // prompt now (landing on the room's position can take a moment); it
+      // comes back if the play is still refused.
+      if (playBlockedRef.current && v && playbackStateRef.current?.playing) {
+        markPlayBlocked(false);
+        v.play().catch((err) => {
+          if ((err as DOMException)?.name === "NotAllowedError") markPlayBlocked(true);
+        });
+      }
     };
-    window.addEventListener("click", unmute);
-    window.addEventListener("keydown", unmute);
+    // iOS Safari doesn't fire "click" for taps on non-interactive areas, so
+    // also listen for the touch/pointer end that carries the user activation.
+    const events = ["touchend", "pointerup", "click", "keydown"];
+    for (const t of events) window.addEventListener(t, onGesture);
     return () => {
-      window.removeEventListener("click", unmute);
-      window.removeEventListener("keydown", unmute);
+      for (const t of events) window.removeEventListener(t, onGesture);
     };
-  }, []);
+  }, [markPlayBlocked]);
 
   // ---- Guest sync ----
   const { catchingUp } = useDriftSync(
@@ -213,7 +346,7 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
         v.currentTime = computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, conn.serverNow());
         if (st.playing) {
           v.play().catch((e) => {
-            if ((e as DOMException)?.name === "NotAllowedError" && !v.muted) onAutoplayBlocked(v);
+            if ((e as DOMException)?.name === "NotAllowedError") onAutoplayBlocked(v);
           });
         }
       }
@@ -266,6 +399,11 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     [conn.socket, conn.fileMeta, hostSrc, setStreamFile]
   );
 
+  // Another tab took over: its streams replace ours.
+  useEffect(() => {
+    if (isHost && conn.replaced) stopAllStreams();
+  }, [isHost, conn.replaced, stopAllStreams]);
+
   const setStreamMode = useCallback(
     (enabled: boolean) => {
       if (!enabled) stopAllStreams();
@@ -304,7 +442,11 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
       if (!resumeSeekRef.current) return;
       resumeSeekRef.current = false;
       const st = conn.playbackState;
-      if (st) v.currentTime = computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, conn.serverNow());
+      if (!st) return;
+      v.currentTime = computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, conn.serverNow());
+      // Taking over a room that's still playing (another tab was hosting):
+      // join in rather than sit paused while everyone else watches.
+      if (st.playing) v.play().catch(() => {});
     };
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
@@ -318,15 +460,16 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     };
   }, [isHost, hasFile, conn.socket, conn.playbackState, conn.serverNow]);
 
-  // Host socket reconnected: the server paused the room during the outage
-  // while our video kept going, so re-assert and let guests resume (RM-08).
+  // Host socket reconnected: re-assert what our video is actually doing (RM-08).
+  // Either way the server can be wrong: it paused the room during the outage
+  // while our video kept going, or — iPad host leaving Safari — iOS paused our
+  // video but that pause went out on an already-dead socket and was lost.
   useEffect(() => {
     if (!isHost || conn.joinCount < 2) return;
     const v = videoRef.current;
-    if (v && !v.paused) {
-      hostPlayingRef.current = true;
-      conn.socket.emit("host:play", { timestamp: v.currentTime });
-    }
+    if (!v || v.readyState === 0) return; // no file loaded (yet) — nothing to assert
+    hostPlayingRef.current = !v.paused;
+    conn.socket.emit(v.paused ? "host:pause" : "host:play", { timestamp: v.currentTime });
   }, [isHost, conn.joinCount, conn.socket]);
 
   const emitSeek = useCallback(
@@ -381,11 +524,7 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
 
   const onPip = useCallback(() => {
     const v = videoRef.current;
-    if (v && document.pictureInPictureEnabled) {
-      (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(
-        () => {}
-      );
-    }
+    if (v) togglePictureInPicture(v).catch(() => {});
   }, []);
 
   // ---- Chat open/unread ----
@@ -411,6 +550,45 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [isHost, conn.playbackState?.playing, canPlay, emitPause, emitPlay, toggleFullscreen]);
+
+  // Another tab (or window) on this machine is already hosting this room.
+  if (conn.hostElsewhere) {
+    return (
+      <CenteredShell>
+        <h1 className="font-display text-3xl">This room is already being hosted</h1>
+        <p className="max-w-md text-cinema-muted">
+          Another tab or window on this device is hosting room{" "}
+          <span className="font-mono tracking-widest text-cinema-text">{roomId}</span>. Only one can control playback.
+        </p>
+        <div className="flex flex-wrap justify-center gap-3">
+          <button
+            type="button"
+            className="touch-target rounded-lg bg-cinema-accent px-4 py-2 font-semibold text-white hover:bg-cinema-accent/80"
+            onClick={onWatchAsViewer}
+          >
+            Watch as a viewer
+          </button>
+          <button
+            type="button"
+            className="touch-target rounded-lg border border-cinema-accent px-4 py-2 font-semibold text-cinema-accent hover:bg-cinema-accent/10"
+            onClick={conn.takeOverHosting}
+          >
+            Host here instead
+          </button>
+        </div>
+      </CenteredShell>
+    );
+  }
+
+  // Until the server answers the first join (it may first check whether another
+  // tab is hosting), don't show controls this tab might not get.
+  if (!conn.joined && !conn.joinError) {
+    return (
+      <CenteredShell>
+        <p className="text-cinema-muted">Joining room…</p>
+      </CenteredShell>
+    );
+  }
 
   // ---- Join errors ----
   if (conn.joinError) {
@@ -438,9 +616,28 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
       {/* Own-connection outage */}
       {!conn.connected && conn.joined && <OverlayMessage>Reconnecting…</OverlayMessage>}
       {/* SP-07 */}
-      {catchingUp && <OverlayMessage>Catching up…</OverlayMessage>}
+      {catchingUp && !playBlocked && <OverlayMessage>Catching up…</OverlayMessage>}
+      {/* iOS Low Power Mode: even muted playback needs a tap */}
+      {!isHost && playBlocked && playing && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Tap to start playback</p>
+          <p className="text-sm text-cinema-muted">Your device is blocking autoplay (Low Power Mode?).</p>
+        </OverlayPrompt>
+      )}
       {/* Host reloaded the page: the room still has the movie, the browser doesn't */}
-      {isHost && conn.fileMeta && !hostSrc && (
+      {/* Another tab took over hosting: this one no longer controls anything */}
+      {isHost && conn.replaced && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Hosting moved to another tab</p>
+          <p className="text-sm text-cinema-muted">
+            Playback is now controlled from another tab or window. Pausing or seeking here won't affect anyone.
+          </p>
+          <button type="button" className={PROMPT_BUTTON} onClick={conn.takeOverHosting}>
+            Host here instead
+          </button>
+        </OverlayPrompt>
+      )}
+      {isHost && !conn.replaced && conn.fileMeta && !hostSrc && (
         <OverlayPrompt>
           <p className="font-display text-2xl text-cinema-text">Re-select your video to continue</p>
           <p className="text-sm text-cinema-muted">
@@ -455,7 +652,10 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
       {/* Guest stream startup */}
       {!isHost && conn.fileMeta && !src && conn.streamToGuests && (
         <OverlayPrompt>
-          <p className="font-display text-2xl text-cinema-text">Connecting to host's stream…</p>
+          <p className="font-display text-2xl text-cinema-text">
+            {receiver.error ? "Can't stream here" : "Connecting to host's stream…"}
+          </p>
+          {receiver.error && <p className="max-w-md text-sm text-yellow-300">{receiver.error}</p>}
           <p className="text-sm text-cinema-muted">Already have this movie on your computer?</p>
           <FilePickButton onPick={pickLocalCopy} className={PROMPT_BUTTON}>
             Use my own copy
@@ -476,7 +676,7 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
         </OverlayPrompt>
       )}
       {/* Transfer progress chip */}
-      {!isHost && receiver.totalBytes > 0 && !receiver.complete && (
+      {!isHost && receiver.totalBytes > 0 && !receiver.complete && !receiver.streamingOnly && (
         <div className="absolute bottom-20 right-3 z-20 flex items-center gap-2 rounded-lg bg-black/60 px-2 py-1 font-mono text-xs text-cinema-text/90">
           buffering {transferPct}%
           <FilePickButton
@@ -595,6 +795,7 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
         {conn.fileMeta ? (
           <VideoPlayer
             videoRef={videoRef}
+            disableRemotePlayback={!isHost && receiver.mode === "mse" && receiver.managed}
             containerRef={containerRef}
             src={src}
             subtitleUrl={subtitleUrl}

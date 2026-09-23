@@ -9,7 +9,7 @@ export function ReactionBar({ onReact }: { onReact: (emoji: string) => void }) {
           type="button"
           onClick={() => onReact(emoji)}
           aria-label={`React with ${emoji}`}
-          className="rounded-lg px-1.5 py-0.5 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors"
+          className="touch-target rounded-lg px-1.5 py-0.5 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors"
         >
           {emoji}
         </button>

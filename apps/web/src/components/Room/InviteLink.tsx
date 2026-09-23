@@ -25,7 +25,7 @@ export function CopyLinkButton({ roomId }: { roomId: string }) {
   return (
     <button
       type="button"
-      className="rounded-lg bg-cinema-surface px-2 py-1 text-xs hover:bg-cinema-surface/70 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
+      className="touch-target rounded-lg bg-cinema-surface px-2 py-1 text-xs hover:bg-cinema-surface/70 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
       onClick={async () => {
         // Last resort: show the link so it can be copied by hand.
         if (!(await copy())) window.prompt("Copy this invite link:", roomLink(roomId));

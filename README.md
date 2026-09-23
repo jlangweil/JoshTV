@@ -65,8 +65,11 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
 - Host reads the file in 512KB slices (BF-08) and sends 64KB chunks per guest over an
   ordered, reliable RTCDataChannel with backpressure (1MB high-water mark). Every chunk
   carries its byte offset, and a guest can redirect its stream to any byte range.
-- Guests remux incoming bytes to fragmented MP4 with **mp4box.js** and feed MSE for a
-  fast start (< 3s typical), reporting buffered-ahead seconds every 500ms (BF-02).
+- Guests store incoming bytes in Blobs (outside the page's JS memory), and a feeder
+  remuxes them to fragmented MP4 with **mp4box.js** for MSE, only ~30s ahead of the
+  playhead, releasing what's been used. Guest memory stays roughly flat whatever the
+  movie size (a 150MB test movie peaks around 20–40MB of JS heap). Guests report
+  buffered-ahead seconds every 500ms (BF-02).
 - **Late joiners start where the room is.** Once the MP4 index (`moov`) arrives, the guest
   looks up the byte offset of the keyframe at the room's current position. If it doesn't
   have that data and the stream won't reach it within ~8s, it asks the host to jump there.
@@ -81,6 +84,77 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
 - Reconnects use exponential backoff 500ms → 8s (BF-06); on rejoin the server re-sends
   full state and asks the host to re-open the stream (BF-07) — unless the guest already
   holds the whole file, in which case nothing is re-sent.
+
+## iPad / iPhone (Safari)
+
+iPadOS Safari is a first-class client, for guests and for hosts:
+
+- **Leaving Safari / locking the screen.** iOS suspends the page, pauses the video and
+  silently kills its connections. The app recovers on return:
+  - It probes the socket, since it can look connected while dead for ~45s, and reconnects
+    within ~3s if it's gone.
+  - A stalled download asks the host for a new stream and resumes where it left off.
+  - The guest catches up to the room's position.
+  - If the host was the one away, its guests' streams are re-offered, and the room is set
+    to whatever the host's video is actually doing (iOS paused it while the socket was dead).
+- **Memory.** Safari kills tabs that hold too much, and WebKit keeps Blob data in RAM. So
+  guests save downloads to disk in the origin-private file system (OPFS, Safari 15.2+),
+  via a worker. The finished movie plays from that file, just like a local copy. MSE is
+  fed only ~30s ahead, with old data trimmed.
+  - Without OPFS (private browsing, too little storage), iOS guests with movies over 300MB
+    stream only: they keep a ~2-minute window around the playhead and never build the
+    whole file.
+  - Elsewhere without OPFS, Blobs are used; Chrome pages them to disk.
+- **Autoplay.** Sound starts on. Where iOS refuses it, playback continues muted and sound
+  comes on at the first tap (iOS doesn't send `click` for taps on plain areas, so
+  `touchend`/`pointerup` count too). In Low Power Mode, iOS blocks even muted autoplay,
+  so a "Tap to start playback" prompt appears.
+- **Decoder torn down in the background.** iOS can kill a backgrounded page's video
+  decoder ("Media failed to decode"), which permanently breaks its MSE pipeline. Once the
+  page is visible again, the app rebuilds the pipeline from a saved copy of the file header
+  and lands at the room's position. A plain file (finished download, own copy, the host's
+  file) is reloaded. Rebuilds are capped at 4 a minute.
+- **Screen lock.** A screen wake lock is held while the room is playing.
+- **Use HTTPS for iPads.** Over plain `http://<LAN IP>`, Safari hides the storage API, so
+  iPads can't save the movie to disk. They fall back to streaming only (logged as
+  `opfs=false`). Wake lock also needs HTTPS. A tunnel such as
+  `cloudflared tunnel --url http://localhost:3001` gives HTTPS for local testing.
+- **Controls.**
+  - The volume slider is hidden: iOS only allows hardware volume.
+  - Fullscreen keeps the chat on iPad (element fullscreen). iPhone falls back to the
+    native video player.
+  - PiP uses Safari's presentation-mode API where the standard one is missing.
+  - Touch targets are ≥44px on touch screens, with no double-tap zoom and safe-area
+    padding for the home indicator.
+  - The chat input is 16px so focusing it doesn't zoom the page.
+  - The subtitle picker accepts any file on iOS, because iOS greys out `.srt`/`.vtt`,
+    and checks the extension afterwards.
+- **iPhone** has only `ManagedMediaSource`, which is used with AirPlay disabled (it won't
+  open otherwise).
+- **Back/forward cache.** A page restored from Safari's bfcache reloads.
+
+Tested in Edge with iPad emulation plus simulations of these iOS behaviours. Not yet
+verified on a physical iPad.
+
+### Diagnostics
+
+Safari's dev tools on an iPad need a Mac, so clients report to the server console
+instead. `npm start` prints one line per event, tagged with room and name:
+
+```
+16:31:42 [44QHRY] iPad: [client] joined as guest | <user agent> | opfs=true free=10737MB
+16:31:42 [44QHRY] iPad: [client] stream start: 2103MB, storage=disk
+16:31:50 [44QHRY] iPad: [client] jump to 3600s (byte 1402MB, have nothing there)
+16:32:17 [44QHRY] iPad: [client] download complete: playing the whole file from disk
+16:33:05 [44QHRY] iPad: left (transport close)
+```
+
+- **Leave reasons.** `transport close` means the page or tab went away. `ping timeout`
+  means it went silent (suspended, network gone). `client namespace disconnect` is a
+  normal leave.
+- **Crashes.** A tab that crashes leaves no trace itself, but the next load reports it:
+  `previous page ended abruptly … while: <what it was doing>`.
+- **Errors.** JS errors and `<video>` errors are reported as they happen.
 
 ## Own-copy mode (local file as the source)
 
@@ -103,7 +177,15 @@ If viewers already have the movie, nothing needs to stream:
 
 - Rooms: 6-char codes, shareable invite links (`/room/CODE`), 12h expiry, 10-guest cap,
   host-token auth (remembered per browser, so the host keeps control across tabs)
-- Host disconnect → 30s grace overlay; auto-resume on reconnect (RM-07/08)
+- Host disconnect → guests pause, 30s grace overlay, then "host left". When the host
+  returns (even after the 30s), guests are told and the host's real play/pause state is
+  re-applied (RM-07/08)
+- One host at a time: the host token is remembered per browser, so a second tab or window
+  on the host's machine asks **Watch as a viewer** or **Host here instead**. A tab that
+  is taken over is told so and can take hosting back. The server first pings the current
+  host tab and only treats it as active if it answers, so a host coming back after its old
+  connection silently died isn't blocked. Reconnects of the hosting tab reclaim hosting
+  without asking.
 - Own-copy mode: viewers can play a local copy; host can turn streaming off entirely
 - Sound on by default; if the browser blocks unmuted autoplay (no click on the page yet),
   the video plays muted in sync and sound turns on at the first click or key press
@@ -173,8 +255,6 @@ relay bandwidth applies there.
 
 - Streaming is WebRTC-only; there is no server-relay fallback for networks where
   NAT traversal fails (would need a TURN server — add one to `RTC_CONFIG`).
-- A guest who reconnects mid-download starts the download over, from the room's current
-  position (finished downloads and local copies are kept).
 - Jumping to the room's position needs the MP4 index at the front of the file
   ("faststart"). For files with the index at the end, guests wait for the full download.
   `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4` fixes a file without re-encoding.

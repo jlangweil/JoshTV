@@ -35,7 +35,7 @@ export function ChatPanel({ messages, users, roomId, onSend, overlay, open, onCl
         </div>
         <button
           type="button"
-          className="rounded px-2 py-0.5 text-cinema-muted hover:bg-cinema-surface hover:text-cinema-text"
+          className="touch-target rounded px-2 py-0.5 text-cinema-muted hover:bg-cinema-surface hover:text-cinema-text"
           onClick={onClose}
           aria-label="Collapse chat"
         >

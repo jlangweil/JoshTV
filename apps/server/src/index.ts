@@ -45,8 +45,20 @@ app.get("/api/health", (_req, res) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webDist = path.resolve(__dirname, "../../web/dist");
 if (existsSync(webDist)) {
-  app.use(express.static(webDist));
-  app.get("*", (_req, res) => res.sendFile(path.join(webDist, "index.html")));
+  // index.html must always be revalidated, or a browser can keep running an
+  // old build (seen with Chrome on iPad). Vite's hashed assets never change.
+  app.use(
+    express.static(webDist, {
+      setHeaders: (res, filePath) => {
+        const hashed = filePath.includes(`${path.sep}assets${path.sep}`);
+        res.setHeader("Cache-Control", hashed ? "public, max-age=31536000, immutable" : "no-cache");
+      },
+    })
+  );
+  app.get("*", (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.join(webDist, "index.html"));
+  });
 }
 
 const httpServer = createServer(app);

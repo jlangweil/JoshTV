@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { SeekBar } from "./SeekBar";
 import { ReactionBar } from "../Reactions/ReactionBar";
 import { PLAYBACK_SPEEDS } from "../../types";
+import { canSetVolume, isIOS } from "../../lib/platform";
 
 interface Props {
   isHost: boolean;
@@ -31,10 +32,10 @@ export function Controls(p: Props) {
   const captionInput = useRef<HTMLInputElement>(null);
 
   const btn =
-    "rounded-lg px-2 py-1 text-sm font-medium text-cinema-text/90 hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors";
+    "touch-target rounded-lg px-2 py-1 text-sm font-medium text-cinema-text/90 hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors";
 
   return (
-    <div className="flex flex-col gap-2 px-4 pb-3 pt-1">
+    <div className="safe-bottom flex flex-col gap-2 px-4 pb-3 pt-1">
       <SeekBar currentTime={p.currentTime} duration={p.duration} onSeek={p.isHost ? p.onSeek : undefined} />
       <div className="flex flex-wrap items-center gap-2">
         {p.isHost ? (
@@ -61,24 +62,34 @@ export function Controls(p: Props) {
         )}
 
         <div className="flex items-center gap-1">
-          <button type="button" className={btn} onClick={p.onMute} aria-label={p.muted ? "Unmute" : "Mute"}>
+          <button
+            type="button"
+            className={btn}
+            onClick={p.onMute}
+            aria-label={p.muted ? "Unmute" : "Mute"}
+            data-audio-control
+          >
             {p.muted ? "\u{1F507}" : "\u{1F50A}"}
           </button>
-          <input
-            type="range"
-            className="seek-range w-20"
-            min={0}
-            max={1}
-            step={0.05}
-            value={p.muted ? 0 : p.volume}
-            aria-label="Volume"
-            onChange={(e) => p.onVolume(Number(e.target.value))}
-          />
+          {/* iOS ignores programmatic volume — hardware buttons only. */}
+          {canSetVolume && (
+            <input
+              type="range"
+              className="seek-range w-20"
+              min={0}
+              max={1}
+              step={0.05}
+              value={p.muted ? 0 : p.volume}
+              aria-label="Volume"
+              data-audio-control
+              onChange={(e) => p.onVolume(Number(e.target.value))}
+            />
+          )}
         </div>
 
         {p.isHost ? (
           <select
-            className="rounded-lg border border-cinema-surface bg-cinema-panel px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-cinema-accent"
+            className="touch-target rounded-lg border border-cinema-surface bg-cinema-panel px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-cinema-accent"
             value={p.speed}
             aria-label="Playback speed"
             onChange={(e) => p.onSpeed(Number(e.target.value))}
@@ -111,11 +122,16 @@ export function Controls(p: Props) {
             <input
               ref={captionInput}
               type="file"
-              accept=".vtt,.srt"
-              className="hidden"
+              // iOS greys out extensions it has no file type for (.srt, .vtt),
+              // so let anything be picked there and check the name instead.
+              accept={isIOS ? undefined : ".vtt,.srt"}
+              // sr-only rather than display:none: older iOS won't open a
+              // picker for a hidden input via click().
+              className="sr-only"
+              tabIndex={-1}
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) p.onCaptionFile(f);
+                if (f && /\.(srt|vtt)$/i.test(f.name)) p.onCaptionFile(f);
                 e.target.value = "";
               }}
             />

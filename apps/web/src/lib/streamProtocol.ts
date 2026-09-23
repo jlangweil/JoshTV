@@ -28,7 +28,7 @@ export interface ResetMessage {
   type: "reset";
 }
 
-/** Guest -> host: send [start, end) next, abandoning the current range. */
+/** Guest -> host: send [start, end) next, abandoning the current range. An empty range pauses sending. */
 export interface RangeMessage {
   type: "range";
   start: number;

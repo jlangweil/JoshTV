@@ -17,7 +17,7 @@ export function FilePickButton({ onPick, children, className, accept = VIDEO_ACC
       title={title}
       className={
         className ??
-        "cursor-pointer rounded-lg bg-cinema-surface px-2 py-1 hover:bg-cinema-surface/70 focus-within:ring-2 focus-within:ring-cinema-accent"
+        "touch-target cursor-pointer rounded-lg bg-cinema-surface px-2 py-1 hover:bg-cinema-surface/70 focus-within:ring-2 focus-within:ring-cinema-accent"
       }
     >
       {children}

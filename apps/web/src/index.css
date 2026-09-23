@@ -6,6 +6,29 @@ html {
   /* Reserve scrollbar space so its appearance never shifts the layout
      (a width change here can oscillate responsive breakpoints). */
   scrollbar-gutter: stable;
+  /* iPad/iPhone: no double-tap zoom (rapid reaction taps), no grey tap flash,
+     no font inflation on rotate. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Finger-sized hit areas (Apple's 44pt guideline) on touch screens only. */
+@media (pointer: coarse) {
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+/* Keep the bottom controls clear of the iPad home indicator (viewport-fit=cover). */
+.safe-bottom {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
 }
 
 body {

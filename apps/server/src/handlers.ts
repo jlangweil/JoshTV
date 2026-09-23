@@ -17,6 +17,14 @@ interface SocketCtx {
   color: string;
   /** Sliding-window timestamps for chat rate limiting (CH-10). */
   chatTimes: number[];
+  /** Sliding-window timestamps for client diagnostics rate limiting. */
+  diagTimes: number[];
+}
+
+/** One console line per event, tagged with room and person. */
+function logLine(roomId: string | null, who: string, text: string): void {
+  const time = new Date().toISOString().slice(11, 19);
+  console.log(`${time} [${roomId ?? "------"}] ${who || "?"}: ${text}`);
 }
 
 const ctxBySocket = new Map<string, SocketCtx>();
@@ -50,24 +58,25 @@ function requestMissingStreams(io: Server, room: Room): void {
 }
 
 export function registerHandlers(io: Server, socket: Socket): void {
-  const ctx: SocketCtx = { roomId: null, isHost: false, name: "", color: "", chatTimes: [] };
+  const ctx: SocketCtx = { roomId: null, isHost: false, name: "", color: "", chatTimes: [], diagTimes: [] };
   ctxBySocket.set(socket.id, ctx);
 
   const currentRoom = (): Room | undefined =>
     ctx.roomId ? getRoom(ctx.roomId) : undefined;
 
   // ---- Clock sync (SP-11) ----
-  socket.on("clock:ping", (data: { clientTime: number }) => {
-    socket.emit("clock:response", {
-      clientTime: data?.clientTime ?? 0,
-      serverTime: Date.now(),
-    });
+  // With an ack callback it doubles as a liveness probe: a client returning
+  // from the background uses it to tell a live socket from a dead one.
+  socket.on("clock:ping", (data: { clientTime: number }, ack?: (res: unknown) => void) => {
+    const res = { clientTime: data?.clientTime ?? 0, serverTime: Date.now() };
+    if (typeof ack === "function") ack(res);
+    else socket.emit("clock:response", res);
   });
 
   // ---- Join ----
   socket.on(
     "room:join",
-    (
+    async (
       data: {
         roomId: string;
         name: string;
@@ -76,6 +85,12 @@ export function registerHandlers(io: Server, socket: Socket): void {
         hostToken?: string;
         /** File id the guest already holds (finished download or local copy). */
         mediaFileId?: string;
+        /**
+         * Host only: take over even if another tab is hosting. Set for a tab
+         * reconnecting after it was already the host, or when the person
+         * chose "Host here instead".
+         */
+        takeover?: boolean;
       },
       ack?: (res: { ok: boolean; error?: string }) => void
     ) => {
@@ -89,13 +104,41 @@ export function registerHandlers(io: Server, socket: Socket): void {
         if (data.hostToken !== room.hostToken) {
           return ack?.({ ok: false, error: "Invalid host token" });
         }
-        // Host (re)connecting — cancel the disconnect grace timer (RM-08).
+        // The host token lives in the browser, so a second tab (or window) on
+        // the host's machine arrives with it too. Never let that silently
+        // steal hosting: if the current host tab is alive, ask first.
+        const prevId = room.hostSocketId;
+        const prev = prevId && prevId !== socket.id ? io.sockets.sockets.get(prevId) : undefined;
+        if (prev?.connected && !data.takeover) {
+          // "Connected" can be stale (an iPad host that left Safari): confirm it answers.
+          const alive = await prev
+            .timeout(2000)
+            .emitWithAck("host:ping")
+            .then(() => true)
+            .catch(() => false);
+          if (alive) return ack?.({ ok: false, error: "host-elsewhere" });
+        }
+        if (prev?.connected) {
+          // The old tab stays in the room as a viewer and is told why.
+          const prevUser = room.users.get(prev.id);
+          if (prevUser) prevUser.isHost = false;
+          const prevCtx = ctxBySocket.get(prev.id);
+          if (prevCtx) prevCtx.isHost = false;
+          prev.emit("host:replaced");
+          logLine(room.roomId, prevUser?.name ?? "?", "hosting taken over by another tab");
+        }
+        // Host (re)connecting — cancel the disconnect grace timer (RM-08) and
+        // tell guests, even if the grace period already ran out.
         if (room.hostGraceTimer) {
           clearTimeout(room.hostGraceTimer);
           room.hostGraceTimer = null;
-          io.to(room.roomId).emit("host:reconnected");
         }
+        if (prevId === null) io.to(room.roomId).emit("host:reconnected");
         room.hostSocketId = socket.id;
+        // Guests' peer connections to the host's previous socket are likely
+        // dead (e.g. an iPad host left Safari): re-offer to anyone still missing
+        // the file. Guests resume their downloads rather than restarting.
+        setTimeout(() => requestMissingStreams(io, room), 500);
       } else {
         const guestCount = [...room.users.values()].filter((u) => !u.isHost).length;
         if (guestCount >= MAX_GUESTS) {
@@ -114,6 +157,7 @@ export function registerHandlers(io: Server, socket: Socket): void {
       socket.join(room.roomId);
 
       ack?.({ ok: true });
+      logLine(room.roomId, name, `joined as ${data.isHost ? "host" : "guest"} (socket ${socket.id})`);
 
       // Full state for the joiner (sync:state on join/reconnect).
       socket.emit("sync:state", {
@@ -251,6 +295,14 @@ export function registerHandlers(io: Server, socket: Socket): void {
     requestMissingStreams(io, room);
   });
 
+  // Guest's stream stalled (connection dropped while it was in the background, etc.).
+  socket.on("guest:stream-request", () => {
+    const room = currentRoom();
+    if (!room || ctx.isHost || !room.fileMeta || !room.hostSocketId || !room.streamToGuests) return;
+    if (room.guestBufferStates.get(socket.id)?.complete) return;
+    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id });
+  });
+
   // ---- Guest buffer reports (BF-02/BF-03) ----
   socket.on(
     "guest:buffer",
@@ -345,7 +397,20 @@ export function registerHandlers(io: Server, socket: Socket): void {
   });
 
   // ---- Disconnect (RM-07/RM-08) ----
-  socket.on("disconnect", () => {
+  // Diagnostics from a client's browser (see apps/web/src/lib/diag.ts): the
+  // only easy window into an iPad's Safari without a Mac.
+  socket.on("client:diag", (data: { msg: string }) => {
+    const now = Date.now();
+    ctx.diagTimes = ctx.diagTimes.filter((t) => now - t < 60_000);
+    if (ctx.diagTimes.length >= 60) return;
+    ctx.diagTimes.push(now);
+    logLine(ctx.roomId, ctx.name, `[client] ${String(data?.msg ?? "").slice(0, 400)}`);
+  });
+
+  socket.on("disconnect", (reason: string) => {
+    // "transport close" right after activity usually means the page died or was
+    // closed; "ping timeout" means it went silent (suspended, network gone).
+    if (ctx.roomId) logLine(ctx.roomId, ctx.name, `left (${reason})`);
     const room = currentRoom();
     ctxBySocket.delete(socket.id);
     if (!room) return;
@@ -371,6 +436,9 @@ export function registerHandlers(io: Server, socket: Socket): void {
       const elapsed = st.playing ? ((now - st.updatedAt) / 1000) * st.speed : 0;
       room.playbackState = { ...st, playing: false, currentTime: st.currentTime + elapsed, updatedAt: now };
 
+      // Guests follow the host: pause them too (the host re-asserts its real
+      // state when it reconnects).
+      io.to(room.roomId).emit("sync:pause", { timestamp: room.playbackState.currentTime, serverTime: now });
       io.to(room.roomId).emit("host:disconnected", { graceMs: HOST_GRACE_MS });
       room.hostGraceTimer = setTimeout(() => {
         room.hostGraceTimer = null;

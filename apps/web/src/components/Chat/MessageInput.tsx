@@ -41,14 +41,14 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
       <div className="flex items-center gap-1">
         <button
           type="button"
-          className="rounded-lg px-2 py-1 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent"
+          className="touch-target rounded-lg px-2 py-1 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent"
           onClick={() => setPickerOpen((o) => !o)}
           aria-label="Emoji picker"
         >
           {"\u{1F600}"}
         </button>
         <input
-          className="min-w-0 flex-1 rounded-lg border border-cinema-surface bg-cinema-bg px-3 py-1.5 text-sm placeholder:text-cinema-muted focus:outline-none focus:ring-2 focus:ring-cinema-accent"
+          className="min-w-0 flex-1 rounded-lg border border-cinema-surface bg-cinema-bg px-3 py-1.5 text-base sm:text-sm placeholder:text-cinema-muted focus:outline-none focus:ring-2 focus:ring-cinema-accent"
           placeholder="Say something…"
           value={text}
           maxLength={500}
@@ -63,7 +63,7 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
         />
         <button
           type="button"
-          className="rounded-lg bg-cinema-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-cinema-accent/80 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
+          className="touch-target rounded-lg bg-cinema-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-cinema-accent/80 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
           onClick={submit}
           aria-label="Send message"
         >
