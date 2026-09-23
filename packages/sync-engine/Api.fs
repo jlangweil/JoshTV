@@ -45,8 +45,5 @@ let caughtUp (expected: float) (actual: float) : bool =
 let bufferedAhead (ranges: float[]) (currentTime: float) : float =
     BufferManager.bufferedAhead (Array.toList ranges) currentTime
 
-let isBufferLow (aheadSeconds: float) : bool =
-    (BufferManager.evaluate aheadSeconds BufferManager.lowThresholdSeconds).IsLow
-
 let bufferHealth (aheadSeconds: float) (isComplete: bool) : string =
     BufferManager.healthBucket aheadSeconds isComplete

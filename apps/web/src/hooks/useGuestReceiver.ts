@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, RefObject } from "react";
 import { Socket } from "socket.io-client";
-import { RTC_CONFIG, parseControl } from "../lib/streamProtocol";
+import { RTC_CONFIG, parseControl, decodeChunk } from "../lib/streamProtocol";
 import { StreamAssembler } from "../lib/StreamAssembler";
 
 export interface ReceiverState {
@@ -36,10 +36,15 @@ export function useGuestReceiver(
   joined: boolean,
   videoRef: RefObject<HTMLVideoElement>,
   /** Room's current FileMeta.id; media for any other id is stale. */
-  currentFileId: string | null
+  currentFileId: string | null,
+  /** Where the room is right now (seconds), so a late joiner fetches that part first. */
+  getRoomTime: () => number | null
 ): ReceiverState & { loadLocalFile: (file: File) => void } {
   const [state, setState] = useState<ReceiverState>(EMPTY);
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
+  const getRoomTimeRef = useRef(getRoomTime);
+  getRoomTimeRef.current = getRoomTime;
   const assemblerRef = useRef<StreamAssembler | null>(null);
   const localRef = useRef<{ fileId: string | null; url: string } | null>(null);
   const mediaFileIdRef = useRef<string | null>(null);
@@ -84,14 +89,16 @@ export function useGuestReceiver(
             setState((s) => ({ ...s, receivedBytes, totalBytes })),
           onComplete: () => setState((s) => ({ ...s, complete: true })),
           onError: (error) => setState((s) => ({ ...s, error })),
+          requestRange: (start, end) => {
+            const dc = dcRef.current;
+            if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "range", start, end }));
+          },
         });
         setState((s) => ({ ...s, fileId: msg.fileId }));
         assembler.start(msg.size);
         assemblerRef.current = assembler;
       } else if (msg.type === "reset") {
         dropMedia();
-      } else if (msg.type === "eof") {
-        assemblerRef.current?.eof();
       }
     };
 
@@ -107,11 +114,13 @@ export function useGuestReceiver(
       pc.ondatachannel = (e) => {
         const dc = e.channel;
         dc.binaryType = "arraybuffer";
+        dcRef.current = dc;
         dc.onmessage = (ev) => {
           if (typeof ev.data === "string") {
             handleControl(ev.data, pc);
           } else if (ev.data instanceof ArrayBuffer) {
-            assemblerRef.current?.push(ev.data);
+            const { offset, data } = decodeChunk(ev.data);
+            assemblerRef.current?.push(offset, data);
           }
         };
       };
@@ -136,9 +145,16 @@ export function useGuestReceiver(
       }
     };
 
+    // Late join / host jumped ahead: steer the download to the room's position.
+    const positionTimer = setInterval(() => {
+      const t = getRoomTimeRef.current();
+      if (t !== null) assemblerRef.current?.ensurePosition(t);
+    }, 500);
+
     socket.on("rtc:offer", onOffer);
     socket.on("rtc:ice", onIce);
     return () => {
+      clearInterval(positionTimer);
       socket.off("rtc:offer", onOffer);
       socket.off("rtc:ice", onIce);
       pcRef.current?.close();

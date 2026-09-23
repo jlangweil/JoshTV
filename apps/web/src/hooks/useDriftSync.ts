@@ -23,14 +23,24 @@ export function useDriftSync(
   videoRef: RefObject<HTMLVideoElement>,
   playbackState: PlaybackState | null,
   serverNow: () => number,
-  enabled: boolean
+  enabled: boolean,
+  /** Browser refused unmuted playback (no user interaction yet). */
+  onAutoplayBlocked?: (video: HTMLVideoElement) => void
 ): { catchingUp: boolean } {
   const [catchingUp, setCatchingUp] = useState(false);
   const catchingUpRef = useRef(false);
   const lastCorrectionRef = useRef(0);
+  const onBlockedRef = useRef(onAutoplayBlocked);
+  onBlockedRef.current = onAutoplayBlocked;
 
   useEffect(() => {
     if (!enabled) return;
+
+    const tryPlay = (video: HTMLVideoElement) => {
+      video.play().catch((e) => {
+        if ((e as DOMException)?.name === "NotAllowedError" && !video.muted) onBlockedRef.current?.(video);
+      });
+    };
 
     const setCatching = (value: boolean) => {
       if (catchingUpRef.current !== value) {
@@ -79,7 +89,7 @@ export function useDriftSync(
         // with enough runway that we won't immediately stall again.
         if (video.readyState >= 3 && caughtUp(expected, actual) && ahead >= RESUME_BUFFER_S) {
           setCatching(false);
-          video.play().catch(() => {});
+          tryPlay(video);
         } else if (driftSeconds(expected, actual) > 1.0 && canCorrect) {
           correct(expected);
         }
@@ -95,9 +105,7 @@ export function useDriftSync(
         // SP-06: silent re-seek.
         if (canCorrect) correct(expected);
       } else if (video.paused) {
-        video.play().catch(() => {
-          // Autoplay restrictions — the tap-to-unmute overlay handles this.
-        });
+        tryPlay(video);
       }
     };
 

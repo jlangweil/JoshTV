@@ -20,7 +20,6 @@ export const caughtUp: (expected: number, actual: number) => boolean = Api.caugh
 
 /** ranges: flat [start, end, start, end, ...] from video.buffered. */
 export const bufferedAhead: (ranges: number[], currentTime: number) => number = Api.bufferedAhead;
-export const isBufferLow: (aheadSeconds: number) => boolean = Api.isBufferLow;
 export const bufferHealth: (aheadSeconds: number, isComplete: boolean) => "green" | "yellow" | "red" =
   Api.bufferHealth;
 

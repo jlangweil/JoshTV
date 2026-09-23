@@ -52,7 +52,6 @@ export interface Room {
   chatHistory: ChatMessage[];
   subtitleVtt: string | null;
   fileMeta: FileMeta | null;
-  autoPauseOnBufferLow: boolean;
   /** When false, nobody is streamed to — every guest loads their own copy. */
   streamToGuests: boolean;
   lastActivity: number;

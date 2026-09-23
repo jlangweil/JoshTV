@@ -10,7 +10,6 @@ import { Identity, loadIdentity, saveIdentity, loadHostToken } from "../lib/iden
 import { getRoomInfo } from "../lib/api";
 import { probeVideoMeta } from "../lib/mp4Meta";
 import { toVtt } from "../lib/subtitles";
-import { isBufferLow } from "../lib/sync";
 import { computeExpectedTime } from "../lib/sync";
 import { VideoPlayer } from "../components/VideoPlayer/VideoPlayer";
 import { ChatPanel } from "../components/Chat/ChatPanel";
@@ -108,14 +107,27 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
 
   // ---- Media sources ----
   const [hostSrc, setHostSrc] = useState<string | null>(null);
-  const receiver = useGuestReceiver(conn.socket, conn.joined && !isHost, videoRef, conn.fileMeta?.id ?? null);
+  const playbackStateRef = useRef(conn.playbackState);
+  playbackStateRef.current = conn.playbackState;
+  const { serverNow } = conn;
+  const getRoomTime = useCallback(() => {
+    const st = playbackStateRef.current;
+    return st ? computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, serverNow()) : null;
+  }, [serverNow]);
+  const receiver = useGuestReceiver(
+    conn.socket,
+    conn.joined && !isHost,
+    videoRef,
+    conn.fileMeta?.id ?? null,
+    getRoomTime
+  );
   mediaFileIdRef.current = receiver.complete ? receiver.fileId : null;
   const src = isHost ? hostSrc : receiver.src;
   const usingLocalCopy = receiver.mode === "local";
 
   // ---- Local-only audio (PC-03/PC-04) ----
   const [volume, setVolume] = useState(1);
-  const [muted, setMuted] = useState(!isHost); // guests start muted for autoplay
+  const [muted, setMuted] = useState(false);
   useEffect(() => {
     const v = videoRef.current;
     if (v) {
@@ -124,8 +136,40 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     }
   }, [volume, muted, src]);
 
+  // Everyone starts with sound on. Browsers refuse unmuted playback until the
+  // viewer has interacted with the page (e.g. a returning guest who opened the
+  // link and went straight in), so fall back to muted to keep the picture in
+  // sync, and turn sound back on at their first click or key press.
+  const autoMutedRef = useRef(false);
+  const onAutoplayBlocked = useCallback((v: HTMLVideoElement) => {
+    autoMutedRef.current = true;
+    v.muted = true;
+    setMuted(true);
+    v.play().catch(() => {});
+  }, []);
+  useEffect(() => {
+    const unmute = () => {
+      if (!autoMutedRef.current) return;
+      autoMutedRef.current = false;
+      if (videoRef.current) videoRef.current.muted = false;
+      setMuted(false);
+    };
+    window.addEventListener("click", unmute);
+    window.addEventListener("keydown", unmute);
+    return () => {
+      window.removeEventListener("click", unmute);
+      window.removeEventListener("keydown", unmute);
+    };
+  }, []);
+
   // ---- Guest sync ----
-  const { catchingUp } = useDriftSync(videoRef, conn.playbackState, conn.serverNow, !isHost && Boolean(src));
+  const { catchingUp } = useDriftSync(
+    videoRef,
+    conn.playbackState,
+    conn.serverNow,
+    !isHost && Boolean(src),
+    onAutoplayBlocked
+  );
   useBufferReporter(
     conn.socket,
     videoRef,
@@ -167,7 +211,11 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
       const st = conn.playbackState;
       if (st) {
         v.currentTime = computeExpectedTime(st.playing, st.currentTime, st.speed, st.updatedAt, conn.serverNow());
-        if (st.playing) v.play().catch(() => {});
+        if (st.playing) {
+          v.play().catch((e) => {
+            if ((e as DOMException)?.name === "NotAllowedError" && !v.muted) onAutoplayBlocked(v);
+          });
+        }
       }
     };
     v.addEventListener("loadedmetadata", onLoaded);
@@ -310,34 +358,7 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
     return () => clearInterval(interval);
   }, [isHost, conn.joined, conn.socket]);
 
-  // ---- Buffering gate (SP-10) + auto-pause (BF-04) ----
-  const [bufferingGate, setBufferingGate] = useState(true);
-  const allGuestsReady =
-    guestIds.length === 0 ||
-    guestIds.every((id) => {
-      const st = conn.bufferStates[id];
-      return st ? st.ready || st.complete : false;
-    });
-  const canPlay = Boolean(src) && (!bufferingGate || allGuestsReady);
-
-  // BF-04 with hysteresis: pause when a guest drops low, but only resume once
-  // everyone has 15s+ of runway (or finished downloading). Resuming right at
-  // the 5s threshold would drain immediately and flap pause/play forever.
-  const autoPausedRef = useRef(false);
-  useEffect(() => {
-    if (!isHost || !conn.autoPauseOnBufferLow) return;
-    const states = guestIds.map((id) => conn.bufferStates[id]).filter(Boolean);
-    const anyLow = states.some((st) => !st.complete && isBufferLow(st.aheadSeconds));
-    const allRecovered = states.every((st) => st.complete || st.aheadSeconds >= 15);
-    if (conn.playbackState?.playing && anyLow && !autoPausedRef.current) {
-      autoPausedRef.current = true;
-      emitPause();
-    } else if (!conn.playbackState?.playing && autoPausedRef.current && allRecovered) {
-      autoPausedRef.current = false;
-      emitPlay();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conn.bufferStates, conn.autoPauseOnBufferLow, conn.playbackState?.playing, isHost]);
+  const canPlay = Boolean(src);
 
   // ---- Subtitles ----
   const subtitleUrl = useMemo(() => {
@@ -454,16 +475,6 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
           </FilePickButton>
         </OverlayPrompt>
       )}
-      {/* Guest unmute prompt (autoplay policy) */}
-      {!isHost && muted && src && playing && (
-        <button
-          type="button"
-          className="absolute bottom-20 left-1/2 z-20 -translate-x-1/2 rounded-full bg-cinema-accent px-4 py-2 text-sm font-semibold text-white shadow-lg"
-          onClick={() => setMuted(false)}
-        >
-          {"\u{1F50A}"} Tap to unmute
-        </button>
-      )}
       {/* Transfer progress chip */}
       {!isHost && receiver.totalBytes > 0 && !receiver.complete && (
         <div className="absolute bottom-20 right-3 z-20 flex items-center gap-2 rounded-lg bg-black/60 px-2 py-1 font-mono text-xs text-cinema-text/90">
@@ -549,14 +560,6 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
         <GuestList users={conn.users} bufferStates={conn.bufferStates} showBufferDots={isHost} />
         {isHost && (
           <div className="flex items-center gap-3 text-xs">
-            <label className="flex cursor-pointer items-center gap-1" title="Play only starts when every viewer is buffered">
-              <input
-                type="checkbox"
-                checked={bufferingGate}
-                onChange={(e) => setBufferingGate(e.target.checked)}
-              />
-              Buffering gate
-            </label>
             <label
               className="flex cursor-pointer items-center gap-1"
               title="Off: viewers load their own copy of the file and nothing is sent from your computer"
@@ -567,14 +570,6 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
                 onChange={(e) => setStreamMode(e.target.checked)}
               />
               Stream to viewers
-            </label>
-            <label className="flex cursor-pointer items-center gap-1" title="Pause everyone if any viewer runs low">
-              <input
-                type="checkbox"
-                checked={conn.autoPauseOnBufferLow}
-                onChange={(e) => conn.socket.emit("host:auto-pause", { enabled: e.target.checked })}
-              />
-              Auto-pause
             </label>
             <FilePickButton onPick={pickFile}>{conn.fileMeta ? "Replace video" : "Load video"}</FilePickButton>
           </div>
@@ -627,10 +622,16 @@ function RoomInner({ roomId, identity, isHost, hostToken }: InnerProps) {
               onPause: emitPause,
               onSeek: emitSeek,
               onVolume: (v) => {
+                autoMutedRef.current = false;
                 setVolume(v);
                 setMuted(v === 0);
               },
-              onMute: () => setMuted((m) => !m),
+              onMute: () => {
+                // Runs before the window click listener, so the first click on
+                // the mute button itself unmutes instead of toggling twice.
+                autoMutedRef.current = false;
+                setMuted((m) => !m);
+              },
               onSpeed: emitSpeed,
               onFullscreen: toggleFullscreen,
               onPip,

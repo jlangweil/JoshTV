@@ -120,7 +120,6 @@ export function registerHandlers(io: Server, socket: Socket): void {
         playbackState: room.playbackState,
         serverTime: Date.now(),
         fileMeta: room.fileMeta,
-        autoPauseOnBufferLow: room.autoPauseOnBufferLow,
         streamToGuests: room.streamToGuests,
         hostConnected: room.hostSocketId !== null,
       });
@@ -250,13 +249,6 @@ export function registerHandlers(io: Server, socket: Socket): void {
     room.streamToGuests = Boolean(data?.enabled);
     io.to(room.roomId).emit("room:stream-mode", { enabled: room.streamToGuests });
     requestMissingStreams(io, room);
-  });
-
-  socket.on("host:auto-pause", (data: { enabled: boolean }) => {
-    const room = currentRoom();
-    if (!room || !requireHost(room, socket)) return;
-    room.autoPauseOnBufferLow = Boolean(data?.enabled);
-    io.to(room.roomId).emit("room:auto-pause", { enabled: room.autoPauseOnBufferLow });
   });
 
   // ---- Guest buffer reports (BF-02/BF-03) ----

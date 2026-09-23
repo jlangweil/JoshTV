@@ -6,17 +6,29 @@ import {
   HIGH_WATER_MARK,
   LOW_WATER_MARK,
   RTC_CONFIG,
+  encodeChunk,
+  parseControl,
 } from "../lib/streamProtocol";
+
+interface ByteRange {
+  start: number;
+  end: number;
+}
 
 interface PeerStream {
   pc: RTCPeerConnection;
   dc: RTCDataChannel;
   generation: number;
+  /** Range being sent; a guest "range" request replaces it mid-flight. */
+  job: ByteRange | null;
+  /** Resolves the send loop's idle wait when a new job arrives. */
+  wake: (() => void) | null;
 }
 
 /**
  * Host side of the media pipeline: one RTCPeerConnection + DataChannel per
- * guest; the selected file is pushed as ordered binary chunks with
+ * guest. Each guest gets byte 0 onward by default and can redirect the
+ * stream to any range (late join / far seek); chunks go out with
  * backpressure (BF-08). Replacing the file bumps the generation counter,
  * which aborts in-flight send loops and restarts every stream.
  */
@@ -73,21 +85,42 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         }, 1000);
       });
 
+    dc.onmessage = (ev) => {
+      if (typeof ev.data !== "string") return;
+      const msg = parseControl(ev.data);
+      if (msg?.type !== "range") return;
+      const start = Math.max(0, Math.floor(Number(msg.start) || 0));
+      const end = Math.min(file.size, Math.floor(Number(msg.end) || 0));
+      if (end <= start) return;
+      peer.job = { start, end };
+      peer.wake?.();
+    };
+    dc.addEventListener("close", () => peer.wake?.());
+
     try {
       dc.send(JSON.stringify({ type: "meta", fileId, name: file.name, size: file.size }));
-      let offset = 0;
-      while (offset < file.size) {
-        if (!alive()) return;
-        const slice = await file.slice(offset, offset + FILE_READ_CHUNK).arrayBuffer();
-        for (let i = 0; i < slice.byteLength; i += WIRE_CHUNK) {
-          if (!alive()) return;
-          if (dc.bufferedAmount > HIGH_WATER_MARK) await waitDrain();
-          if (!alive()) return;
-          dc.send(slice.slice(i, i + WIRE_CHUNK));
+      peer.job = { start: 0, end: file.size };
+      while (alive()) {
+        const job: ByteRange | null = peer.job;
+        if (!job) {
+          // Guest has everything it asked for; sleep until the next request.
+          await new Promise<void>((resolve) => (peer.wake = resolve));
+          peer.wake = null;
+          continue;
         }
-        offset += slice.byteLength;
+        const current = () => alive() && peer.job === job;
+        let offset = job.start;
+        while (offset < job.end && current()) {
+          const slice = await file.slice(offset, Math.min(offset + FILE_READ_CHUNK, job.end)).arrayBuffer();
+          for (let i = 0; i < slice.byteLength && current(); i += WIRE_CHUNK) {
+            if (dc.bufferedAmount > HIGH_WATER_MARK) await waitDrain();
+            if (!current()) break;
+            dc.send(encodeChunk(offset + i, slice.slice(i, i + WIRE_CHUNK)));
+          }
+          offset += slice.byteLength;
+        }
+        if (peer.job === job) peer.job = null;
       }
-      if (alive()) dc.send(JSON.stringify({ type: "eof" }));
     } catch (e) {
       console.warn(`stream to ${guestId} aborted:`, e);
     }
@@ -101,7 +134,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
       const pc = new RTCPeerConnection(RTC_CONFIG);
       const dc = pc.createDataChannel("media", { ordered: true });
       dc.binaryType = "arraybuffer";
-      const peer: PeerStream = { pc, dc, generation: generationRef.current };
+      const peer: PeerStream = { pc, dc, generation: generationRef.current, job: null, wake: null };
       peersRef.current.set(guestId, peer);
       setActiveStreams(peersRef.current.size);
 

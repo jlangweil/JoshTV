@@ -34,7 +34,6 @@ export function createRoom(): Room {
     chatHistory: [],
     subtitleVtt: null,
     fileMeta: null,
-    autoPauseOnBufferLow: false,
     streamToGuests: true,
     lastActivity: Date.now(),
     hostGraceTimer: null,

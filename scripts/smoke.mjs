@@ -45,11 +45,14 @@ const clock = await once(host, "clock:response");
 check("clock:response echoes clientTime + serverTime", clock.clientTime === t0 && typeof clock.serverTime === "number");
 
 // Host join
+// Listen before joining: sync:state follows the ack immediately and can
+// arrive in the same frame, before a listener attached after the ack.
+const hostStatePromise = once(host, "sync:state");
 const hostAck = await new Promise((resolve) =>
   host.emit("room:join", { roomId, name: "Host", color: "#FFB3BA", isHost: true, hostToken }, resolve)
 );
 check("host join ok", hostAck.ok === true);
-await once(host, "sync:state");
+await hostStatePromise;
 
 // Bad host token rejected
 const badAck = await new Promise((resolve) =>

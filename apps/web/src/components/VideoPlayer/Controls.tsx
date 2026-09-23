@@ -44,7 +44,7 @@ export function Controls(p: Props) {
             onClick={p.playing ? p.onPause : p.onPlay}
             disabled={!p.playing && !p.canPlay}
             aria-label={p.playing ? "Pause" : "Play"}
-            title={!p.playing && !p.canPlay ? "Waiting for all viewers to buffer" : undefined}
+            title={!p.playing && !p.canPlay ? "Load a video first" : undefined}
           >
             {p.playing ? "⏸" : "▶"}
           </button>

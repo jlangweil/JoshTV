@@ -30,7 +30,6 @@ export interface RoomConnection {
   pauseRequest: { user: string; id: string } | null;
   hostConnected: boolean;
   hostGoneForever: boolean;
-  autoPauseOnBufferLow: boolean;
   /** False when the host wants every viewer to load their own copy. */
   streamToGuests: boolean;
   subtitleVtt: string | null;
@@ -89,7 +88,6 @@ export function useRoomConnection({
   const [pauseRequest, setPauseRequest] = useState<{ user: string; id: string } | null>(null);
   const [hostConnected, setHostConnected] = useState(true);
   const [hostGoneForever, setHostGoneForever] = useState(false);
-  const [autoPauseOnBufferLow, setAutoPause] = useState(false);
   const [streamToGuests, setStreamToGuests] = useState(true);
   const [subtitleVtt, setSubtitleVtt] = useState<string | null>(null);
   const [syncPulse, setSyncPulse] = useState(0);
@@ -174,7 +172,6 @@ export function useRoomConnection({
       "sync:state": (d) => {
         setPlaybackState(d.playbackState);
         setFileMeta(d.fileMeta ?? null);
-        setAutoPause(Boolean(d.autoPauseOnBufferLow));
         setStreamToGuests(d.streamToGuests !== false);
         setHostConnected(Boolean(d.hostConnected));
       },
@@ -224,7 +221,6 @@ export function useRoomConnection({
         setHostGoneForever(false);
       },
       "host:gone": () => setHostGoneForever(true),
-      "room:auto-pause": (d) => setAutoPause(Boolean(d.enabled)),
       "room:stream-mode": (d) => setStreamToGuests(Boolean(d.enabled)),
       "caption:update": (d) => setSubtitleVtt(d.vttContent),
       "room:closed": () => setJoinError("Room expired"),
@@ -268,7 +264,6 @@ export function useRoomConnection({
     pauseRequest,
     hostConnected,
     hostGoneForever,
-    autoPauseOnBufferLow,
     streamToGuests,
     subtitleVtt,
     syncPulse,

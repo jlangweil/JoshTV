@@ -63,14 +63,21 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
 ## How streaming/buffering works
 
 - Host reads the file in 512KB slices (BF-08) and sends 64KB chunks per guest over an
-  ordered, reliable RTCDataChannel with backpressure (4MB high-water mark).
+  ordered, reliable RTCDataChannel with backpressure (1MB high-water mark). Every chunk
+  carries its byte offset, and a guest can redirect its stream to any byte range.
 - Guests remux incoming bytes to fragmented MP4 with **mp4box.js** and feed MSE for a
   fast start (< 3s typical), reporting buffered-ahead seconds every 500ms (BF-02).
+- **Late joiners start where the room is.** Once the MP4 index (`moov`) arrives, the guest
+  looks up the byte offset of the keyframe at the room's current position. If it doesn't
+  have that data and the stream won't reach it within ~8s, it asks the host to jump there.
+  The skipped bytes are backfilled afterwards. The same kicks in when the host seeks
+  somewhere a guest hasn't downloaded. Joining at 4:00 of a 150MB file over a ~5 MB/s link
+  plays in sync in under a second instead of ~24s.
 - Every raw chunk is also retained; when the transfer completes the player switches to
   a **Blob URL** — the whole movie is then natively buffered locally, so playback can
   never be interrupted by network hiccups and any seek is instant.
 - Non-faststart MP4s (moov at end) can't remux progressively: guests then wait for the
-  full transfer and play from the blob (the "Buffering gate" makes this seamless).
+  full transfer and play from the blob, showing a "waiting for full download" notice meanwhile.
 - Reconnects use exponential backoff 500ms → 8s (BF-06); on rejoin the server re-sends
   full state and asks the host to re-open the stream (BF-07) — unless the guest already
   holds the whole file, in which case nothing is re-sent.
@@ -98,8 +105,9 @@ If viewers already have the movie, nothing needs to stream:
   host-token auth (remembered per browser, so the host keeps control across tabs)
 - Host disconnect → 30s grace overlay; auto-resume on reconnect (RM-07/08)
 - Own-copy mode: viewers can play a local copy; host can turn streaming off entirely
-- Buffering gate (SP-10): Play disabled until every viewer reports `readyState ≥ 3`
-- Auto-pause on buffer-low toggle (BF-04) with per-guest green/yellow/red dots (BF-03)
+- Sound on by default; if the browser blocks unmuted autoplay (no click on the page yet),
+  the video plays muted in sync and sound turns on at the first click or key press
+- Per-guest buffer health dots for the host: green/yellow/red (BF-03)
 - Guests: read-only seek bar, ✋ pause requests the host can accept/dismiss (SP-09)
 - Chat: 50-message history on join, @mention highlighting, emoji picker, system
   messages, unread badge, 3 msg/sec rate limit, reachable in fullscreen (CH-08)
@@ -165,9 +173,10 @@ relay bandwidth applies there.
 
 - Streaming is WebRTC-only; there is no server-relay fallback for networks where
   NAT traversal fails (would need a TURN server — add one to `RTC_CONFIG`).
-- A guest who reconnects mid-download re-downloads the file from the start (finished
-  downloads and local copies are kept).
-- Host seeking far ahead of what guests have received shows "Catching up…" until the
-  sequential transfer reaches that position.
+- A guest who reconnects mid-download starts the download over, from the room's current
+  position (finished downloads and local copies are kept).
+- Jumping to the room's position needs the MP4 index at the front of the file
+  ("faststart"). For files with the index at the end, guests wait for the full download.
+  `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4` fixes a file without re-encoding.
 - In-memory room state: restarting the server drops rooms (Redis adapter is the
   documented scale-out path).

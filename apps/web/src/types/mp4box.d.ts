@@ -19,6 +19,15 @@ declare module "mp4box" {
     audioTracks: MP4Track[];
   }
 
+  export interface MP4Sample {
+    offset: number;
+    size: number;
+    dts: number;
+    cts: number;
+    timescale: number;
+    is_sync: boolean;
+  }
+
   export interface MP4ArrayBuffer extends ArrayBuffer {
     fileStart: number;
   }
@@ -35,6 +44,9 @@ declare module "mp4box" {
     start(): void;
     stop(): void;
     flush(): void;
+    /** Moves segmentation to the sync sample at/before time; returns the byte offset needed next. */
+    seek(time: number, useRap: boolean): { offset: number; time: number };
+    getTrackById(id: number): { samples?: MP4Sample[] } | undefined;
   }
 
   export function createFile(): ISOFile;
