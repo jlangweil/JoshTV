@@ -7,22 +7,27 @@ interface Props {
   users: RoomUser[];
   roomId: string;
   onSend: (text: string) => void;
-  /** Fullscreen renders the panel as a slide-over (CH-08/FS-02). */
-  overlay: boolean;
   open: boolean;
   onClose: () => void;
 }
 
-export function ChatPanel({ messages, users, roomId, onSend, overlay, open, onClose }: Props) {
+/**
+ * Docked beside the picture on landscape/wide screens, below it on portrait
+ * ones — never on top, so it can't cover the movie or the controls. The same
+ * layout is used in fullscreen, where it's rendered inside the player (CH-08/FS-02).
+ */
+export function ChatPanel({ messages, users, roomId, onSend, open, onClose }: Props) {
   if (!open) return null;
   const guestCount = users.filter((u) => !u.isHost).length;
 
   return (
     <aside
       className={
-        overlay
-          ? "absolute inset-y-0 right-0 z-30 flex w-80 max-w-[85vw] flex-col border-l border-cinema-surface bg-cinema-panel/95 backdrop-blur transition-transform"
-          : "flex h-full w-80 shrink-0 flex-col border-l border-cinema-surface bg-cinema-panel max-lg:w-full max-lg:border-l-0 max-lg:border-t"
+        // Portrait (narrower than a laptop): full width, 40% of the height below the picture.
+        "flex h-2/5 min-h-48 w-full shrink-0 flex-col border-t border-cinema-surface bg-cinema-panel " +
+        // Landscape or wide: a column beside the picture.
+        "landscape:h-full landscape:w-80 landscape:max-w-[40%] landscape:border-l landscape:border-t-0 " +
+        "lg:h-full lg:w-80 lg:max-w-[40%] lg:border-l lg:border-t-0"
       }
       aria-label="Chat"
     >

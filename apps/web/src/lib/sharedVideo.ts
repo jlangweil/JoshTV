@@ -30,6 +30,9 @@ export function unlockMedia(): void {
   v.play().catch(() => {
     // Rejects for lack of a source; the permission is granted regardless.
   });
+  // The permission is granted during the play() call itself; pause straight
+  // away so the empty element doesn't sit in a "playing" state.
+  v.pause();
   unlocked = true;
 }
 

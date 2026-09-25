@@ -3,6 +3,10 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      screens: {
+        // Phones in landscape: every pixel of height goes to the picture.
+        short: { raw: "(max-height: 500px)" },
+      },
       colors: {
         cinema: {
           bg: "#0D0D0F",

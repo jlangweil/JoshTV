@@ -105,10 +105,23 @@ iPadOS Safari is a first-class client, for guests and for hosts:
     stream only: they keep a ~2-minute window around the playhead and never build the
     whole file.
   - Elsewhere without OPFS, Blobs are used; Chrome pages them to disk.
-- **Autoplay.** Sound starts on. Where iOS refuses it, playback continues muted and sound
-  comes on at the first tap (iOS doesn't send `click` for taps on plain areas, so
-  `touchend`/`pointerup` count too). In Low Power Mode, iOS blocks even muted autoplay,
-  so a "Tap to start playback" prompt appears.
+- **Sound on by default.** Safari (and Chrome on iOS, same engine) grants sound per
+  `<video>` element, and only if `play()` was once called on that element during a tap.
+  So the app creates its one video element up front, and the first tap anywhere
+  (Join room, Create Room…) unlocks it before any movie is loaded. Returning viewers who
+  open a link directly get a one-tap "Welcome back" screen that does the unlocking; it's
+  skipped if they tapped their way in. If sound is still refused, playback continues
+  muted and sound comes on at the next tap (`touchend`/`pointerup` count, since iOS
+  doesn't send `click` for taps on plain areas). If even muted playback is blocked
+  (Low Power Mode), a "Tap to start playback" prompt appears.
+- **Layout.** In normal view and fullscreen, the chat never sits on top of the picture or
+  the controls. It docks beside the picture on landscape or wide screens and below it in
+  portrait, and the picture always fills the space left.
+  - The controls stay on one row: when they wouldn't fit (chat open on a small screen),
+    reactions collapse behind one 😊 button, the volume slider hides, and PiP leaves the bar.
+  - On short screens (landscape phones) the header is a single line.
+  - Double-tap the picture to leave (or enter) fullscreen; double-click does the same on
+    desktop.
 - **Decoder torn down in the background.** iOS can kill a backgrounded page's video
   decoder ("Media failed to decode"), which permanently breaks its MSE pipeline. Once the
   page is visible again, the app rebuilds the pipeline from a saved copy of the file header
@@ -198,8 +211,9 @@ If viewers already have the movie, nothing needs to stream:
   broadcast to all, controls auto-hide after 3s, keyboard (space/f/c), ARIA labels,
   `prefers-reduced-motion` respected
 - Identity: display name + 12 pastel avatar colors in `localStorage`, no accounts —
-  first-time visitors are prompted before joining, returning ones go straight in; the Home
-  join box also accepts a pasted invite link
+  first-time visitors are prompted before joining, returning ones are greeted by name and
+  join with one tap (which also lets the movie play with sound); the Home join box also
+  accepts a pasted invite link
 
 ## Repo layout
 

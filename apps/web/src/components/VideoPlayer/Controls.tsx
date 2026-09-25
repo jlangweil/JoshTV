@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { SeekBar } from "./SeekBar";
 import { ReactionBar } from "../Reactions/ReactionBar";
 import { PLAYBACK_SPEEDS } from "../../types";
@@ -28,8 +28,37 @@ interface Props {
   unreadCount: number;
 }
 
+
 export function Controls(p: Props) {
   const captionInput = useRef<HTMLInputElement>(null);
+  // Compact (reactions behind one button, no volume slider) exactly when the
+  // full set of buttons wouldn't fit on one row — measured, not a media query,
+  // since the chat narrows the player on any screen. Keeping one row keeps the
+  // picture as tall as possible.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const fullWidthRef = useRef(0);
+  const [compact, setCompact] = useState(false);
+  const compactRef = useRef(compact);
+  compactRef.current = compact;
+  useLayoutEffect(() => {
+    const row = rowRef.current;
+    if (!row) return;
+    const measure = () => {
+      if (!compactRef.current) {
+        // Natural width of the full layout (spacer excluded), wrapped or not.
+        const kids = [...row.children] as HTMLElement[];
+        const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+        fullWidthRef.current =
+          kids.reduce((sum, k) => sum + (k.dataset.spacer ? 0 : k.offsetWidth), 0) + gap * (kids.length - 1);
+      }
+      const next = row.clientWidth < fullWidthRef.current;
+      if (next !== compactRef.current) setCompact(next);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(row);
+    return () => ro.disconnect();
+  }, [compact, p.isHost]);
 
   const btn =
     "touch-target rounded-lg px-2 py-1 text-sm font-medium text-cinema-text/90 hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors";
@@ -37,7 +66,7 @@ export function Controls(p: Props) {
   return (
     <div className="safe-bottom flex flex-col gap-2 px-4 pb-3 pt-1">
       <SeekBar currentTime={p.currentTime} duration={p.duration} onSeek={p.isHost ? p.onSeek : undefined} />
-      <div className="flex flex-wrap items-center gap-2">
+      <div ref={rowRef} className="flex flex-wrap items-center gap-2">
         {p.isHost ? (
           <button
             type="button"
@@ -72,7 +101,7 @@ export function Controls(p: Props) {
             {p.muted ? "\u{1F507}" : "\u{1F50A}"}
           </button>
           {/* iOS ignores programmatic volume — hardware buttons only. */}
-          {canSetVolume && (
+          {canSetVolume && !compact && (
             <input
               type="range"
               className="seek-range w-20"
@@ -104,9 +133,9 @@ export function Controls(p: Props) {
           <span className="font-mono text-xs text-cinema-muted">{p.speed}x</span>
         )}
 
-        <div className="grow" />
+        <div className="grow" data-spacer />
 
-        <ReactionBar onReact={p.onReact} />
+        <ReactionBar onReact={p.onReact} compact={compact} />
 
         {p.isHost && (
           <>
@@ -138,9 +167,12 @@ export function Controls(p: Props) {
           </>
         )}
 
-        <button type="button" className={btn} onClick={p.onPip} aria-label="Picture in picture">
-          PiP
-        </button>
+        {/* Least-used control: leaves the bar when space is tight (it returns when there's room). */}
+        {!compact && (
+          <button type="button" className={btn} onClick={p.onPip} aria-label="Picture in picture">
+            PiP
+          </button>
+        )}
         <button type="button" className={btn} onClick={p.onToggleChat} aria-label="Toggle chat">
           {"\u{1F4AC}"}
           {p.unreadCount > 0 && (

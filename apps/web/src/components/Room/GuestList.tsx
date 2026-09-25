@@ -26,12 +26,14 @@ export function GuestList({ users, bufferStates, showBufferDots }: Props) {
             className="flex items-center gap-1.5 rounded-full bg-cinema-surface px-2 py-1 text-xs"
             title={
               !u.isHost && st
-                ? st.local
-                  ? "Playing their own copy"
-                  : st.complete
-                    ? "Fully buffered"
-                    : `${st.aheadSeconds.toFixed(1)}s buffered ahead`
-                : undefined
+                ? `${u.name}: ${
+                    st.local
+                      ? "playing their own copy"
+                      : st.complete
+                        ? "fully buffered"
+                        : `${st.aheadSeconds.toFixed(1)}s buffered ahead`
+                  }`
+                : u.name
             }
           >
             <span
@@ -41,7 +43,7 @@ export function GuestList({ users, bufferStates, showBufferDots }: Props) {
             >
               {u.name.charAt(0).toUpperCase()}
             </span>
-            <span className="max-w-24 truncate">{u.name}</span>
+            <span className="max-w-24 truncate short:hidden">{u.name}</span>
             {u.isHost && <span className="font-mono text-[9px] uppercase text-cinema-accent">host</span>}
             {!u.isHost && showBufferDots && (
               <span

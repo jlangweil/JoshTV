@@ -23,6 +23,7 @@ import { CopyLinkButton } from "../components/Room/InviteLink";
 import { IdentityForm } from "../components/IdentityForm";
 import { FilePickButton } from "../components/FilePickButton";
 import { formatTime } from "../components/VideoPlayer/SeekBar";
+import { isMediaUnlocked, unlockMedia } from "../lib/sharedVideo";
 
 export default function RoomPage() {
   const { roomId = "" } = useParams();
@@ -33,6 +34,9 @@ export default function RoomPage() {
   // A host's second tab can choose to just watch (see RoomInner's hostElsewhere).
   const [watchAsViewer, setWatchAsViewer] = useState(false);
   const isHost = hostToken !== null && !watchAsViewer;
+  // Viewers need to tap once before the movie can play with sound (browser
+  // rule). First-timers tap "Join room" on the name form anyway.
+  const [confirmed, setConfirmed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,11 +75,47 @@ export default function RoomPage() {
         </p>
         <IdentityForm
           onSubmit={(id) => {
+            unlockMedia();
             saveIdentity(id);
             setIdentity(id);
+            setConfirmed(true);
           }}
           submitLabel="Join room"
         />
+      </CenteredShell>
+    );
+  }
+  // Returning viewer who opened a link directly: still recognized (no name to
+  // type), but one tap here is what lets the movie play with sound. Skipped if
+  // they already tapped their way here (e.g. from the Home page).
+  if (!isHost && !confirmed && !isMediaUnlocked()) {
+    return (
+      <CenteredShell>
+        <span
+          className="flex h-14 w-14 items-center justify-center rounded-full text-2xl font-bold text-cinema-bg"
+          style={{ backgroundColor: identity.color }}
+          aria-hidden="true"
+        >
+          {identity.name.charAt(0).toUpperCase()}
+        </span>
+        <h1 className="font-display text-3xl">Welcome back, {identity.name}</h1>
+        <p className="text-cinema-muted">
+          You're joining room <span className="font-mono tracking-widest text-cinema-text">{normalizedId}</span>.
+        </p>
+        <button
+          type="button"
+          className="touch-target rounded-lg bg-cinema-accent px-6 py-2.5 font-semibold text-white hover:bg-cinema-accent/80"
+          onClick={() => {
+            unlockMedia();
+            setConfirmed(true);
+          }}
+          autoFocus
+        >
+          Join room
+        </button>
+        <button type="button" className="text-sm text-cinema-muted underline" onClick={() => setIdentity(null)}>
+          Not {identity.name}? Change name
+        </button>
       </CenteredShell>
     );
   }
@@ -251,8 +291,12 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
     setPlayBlocked(blocked);
   }, []);
   const onAutoplayBlocked = useCallback((v: HTMLVideoElement) => {
-    const markBlocked = () => markPlayBlocked(true);
+    const markBlocked = () => {
+      if (!playBlockedRef.current) diag("autoplay blocked even muted: waiting for a tap");
+      markPlayBlocked(true);
+    };
     if (v.muted) return markBlocked();
+    diag("sound blocked by the browser: playing muted until the first tap");
     autoMutedRef.current = true;
     v.muted = true;
     setMuted(true);
@@ -736,7 +780,6 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
       users={conn.users}
       roomId={roomId}
       onSend={conn.sendChat}
-      overlay={isFullscreen}
       open={chatOpen}
       onClose={() => setChatOpen(false)}
     />
@@ -744,14 +787,15 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
-      <header className="flex flex-wrap items-center gap-3 border-b border-cinema-surface bg-cinema-panel px-4 py-2">
+      {/* Short screens (landscape phones): one line that scrolls sideways instead of wrapping. */}
+      <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-cinema-surface bg-cinema-panel px-4 py-2 short:flex-nowrap short:overflow-x-auto short:py-1 short:[&>*]:shrink-0">
         <Link to="/" className="font-display text-xl text-cinema-accent">
           JoshTV
         </Link>
         <span className="font-mono text-sm tracking-widest text-cinema-text/80">{roomId}</span>
         <CopyLinkButton roomId={roomId} />
         {conn.fileMeta && (
-          <span className="hidden truncate text-xs text-cinema-muted sm:inline" title={conn.fileMeta.name}>
+          <span className="hidden truncate text-xs text-cinema-muted sm:inline short:hidden" title={conn.fileMeta.name}>
             {conn.fileMeta.name}
             {conn.fileMeta.width > 0 && ` · ${conn.fileMeta.width}x${conn.fileMeta.height}`}
           </span>
@@ -791,7 +835,7 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
         )}
       </header>
 
-      <main className="flex min-h-0 grow flex-col lg:flex-row">
+      <main className="flex min-h-0 grow flex-col landscape:flex-row lg:flex-row">
         {conn.fileMeta ? (
           <VideoPlayer
             videoRef={videoRef}
