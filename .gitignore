@@ -24,3 +24,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Server logs (npm start writes logs/joshtv-YYYY-MM-DD.log)
+logs/

@@ -10,6 +10,9 @@ import {
 } from "../types";
 import { Identity } from "../lib/identity";
 import { computeClockOffset } from "../lib/sync";
+import { BUILD_ID } from "../lib/buildInfo";
+
+const STALE_RELOAD_KEY = "joshtv-stale-reload";
 
 export interface RoomConnection {
   socket: Socket;
@@ -53,6 +56,8 @@ interface Options {
   hostToken?: string | null;
   /** Guest: FileMeta.id of media already held, read at each (re)join. */
   mediaFileIdRef?: MutableRefObject<string | null>;
+  /** Guest: direct connections failed, so ask for the movie via the server relay. */
+  relayRef?: MutableRefObject<boolean>;
 }
 
 export function useRoomConnection({
@@ -61,6 +66,7 @@ export function useRoomConnection({
   isHost,
   hostToken,
   mediaFileIdRef,
+  relayRef,
 }: Options): RoomConnection {
   const socket = useMemo(() => {
     const options = {
@@ -88,6 +94,8 @@ export function useRoomConnection({
   const [replaced, setReplaced] = useState(false);
   /** This tab has been the host: a reconnect reclaims hosting without asking. */
   const hostedBeforeRef = useRef(false);
+  /** This page has joined once: later joins are reconnects. */
+  const joinedBeforeRef = useRef(false);
   const replacedRef = useRef(false);
   const joinRef = useRef<(takeover: boolean) => void>(() => {});
   const [users, setUsers] = useState<RoomUser[]>([]);
@@ -148,9 +156,18 @@ export function useRoomConnection({
           hostToken,
           mediaFileId: mediaFileIdRef?.current ?? undefined,
           takeover,
+          build: BUILD_ID,
+          rejoin: joinedBeforeRef.current,
+          relay: relayRef?.current ?? false,
         },
         (res: { ok: boolean; error?: string }) => {
           if (res.ok) {
+            joinedBeforeRef.current = true;
+            try {
+              sessionStorage.removeItem(STALE_RELOAD_KEY);
+            } catch {
+              // ignore
+            }
             setJoined(true);
             setJoinCount((n) => n + 1);
             setJoinError(null);
@@ -162,6 +179,17 @@ export function useRoomConnection({
             }
           } else if (res.error === "host-elsewhere") {
             setHostElsewhere(true);
+          } else if (res.error === "stale-build") {
+            // This page is an old cached copy of the app: reload once for the current one.
+            let reloaded = false;
+            try {
+              reloaded = sessionStorage.getItem(STALE_RELOAD_KEY) === "1";
+              if (!reloaded) sessionStorage.setItem(STALE_RELOAD_KEY, "1");
+            } catch {
+              // storage unavailable: fall through to the message
+            }
+            if (!reloaded) window.location.reload();
+            else setJoinError("A newer version of JoshTV is available. Please reload the page.");
           } else {
             setJoinError(res.error ?? "Could not join room");
           }
@@ -187,7 +215,7 @@ export function useRoomConnection({
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
     };
-  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, mediaFileIdRef]);
+  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, mediaFileIdRef, relayRef]);
 
   // ---- Room state events ----
   useEffect(() => {

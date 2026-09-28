@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { REACTION_EMOJIS } from "../../types";
+import { REACTION_EMOJIS, REACTION_NAMES } from "../../types";
 
 const EMOJI_BUTTON =
   "touch-target rounded-lg px-1.5 py-0.5 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent transition-colors";
@@ -22,7 +22,7 @@ export function ReactionBar({ onReact, compact = false }: { onReact: (emoji: str
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
 
-  const buttons = REACTION_EMOJIS.map((emoji) => (
+  const buttons = REACTION_EMOJIS.map((emoji, i) => (
     <button
       key={emoji}
       type="button"
@@ -31,6 +31,7 @@ export function ReactionBar({ onReact, compact = false }: { onReact: (emoji: str
         setOpen(false);
       }}
       aria-label={`React with ${emoji}`}
+      title={`${REACTION_NAMES[i]} — floats across everyone's screen`}
       className={EMOJI_BUTTON}
     >
       {emoji}
@@ -51,6 +52,7 @@ export function ReactionBar({ onReact, compact = false }: { onReact: (emoji: str
         className={EMOJI_BUTTON}
         onClick={() => setOpen((o) => !o)}
         aria-label="Reactions"
+        title="Send a reaction to everyone"
         aria-expanded={open}
       >
         {"\u{1F60A}"}

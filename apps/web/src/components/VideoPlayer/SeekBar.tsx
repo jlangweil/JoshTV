@@ -29,6 +29,7 @@ export function SeekBar({ currentTime, duration, onSeek }: Props) {
           value={Math.min(currentTime, max)}
           disabled={!onSeek}
           aria-label={onSeek ? "Seek" : "Playback position (host controls seeking)"}
+          title={onSeek ? "Jump to a different point (moves everyone)" : "Playback position (the host controls seeking)"}
           onChange={(e) => onSeek?.(Number(e.target.value))}
         />
         <div

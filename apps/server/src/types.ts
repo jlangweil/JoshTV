@@ -21,6 +21,8 @@ export interface RoomUser {
   name: string;
   color: string;
   isHost: boolean;
+  /** Guest gets the movie relayed through the server (a direct connection failed). */
+  relay?: boolean;
 }
 
 export interface FileMeta {

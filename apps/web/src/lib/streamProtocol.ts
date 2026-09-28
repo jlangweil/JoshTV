@@ -33,6 +33,12 @@ export interface RangeMessage {
   type: "range";
   start: number;
   end: number;
+  /**
+   * Playback needs these bytes soon. The host's upload is shared by every
+   * viewer, so non-urgent ranges (stocking up, backfill) wait while another
+   * viewer has an urgent one. Missing = urgent.
+   */
+  urgent?: boolean;
 }
 
 export type ControlMessage = MetaMessage | ResetMessage | RangeMessage;

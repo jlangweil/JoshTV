@@ -10,25 +10,36 @@ import {
   parseControl,
 } from "../lib/streamProtocol";
 import { diag } from "../lib/diag";
+import { HostRelayChannel, StreamChannel } from "../lib/relayChannel";
 
 interface ByteRange {
   start: number;
   end: number;
+  /** Playback on the guest needs it soon (see RangeMessage.urgent). */
+  urgent: boolean;
 }
 
+/** An urgent stream that has sent nothing for this long no longer holds others back (dead link). */
+const URGENT_STALE_MS = 4000;
+
 interface PeerStream {
-  pc: RTCPeerConnection;
-  dc: RTCDataChannel;
+  /** Null when relaying through the server. */
+  pc: RTCPeerConnection | null;
+  dc: StreamChannel;
+  relay: boolean;
   generation: number;
   /** Range being sent; a guest "range" request replaces it mid-flight. */
   job: ByteRange | null;
   /** Resolves the send loop's idle wait when a new job arrives. */
   wake: (() => void) | null;
+  /** Last time a chunk went out on this stream. */
+  sentAt: number;
 }
 
 /**
  * Host side of the media pipeline: one RTCPeerConnection + DataChannel per
- * guest. Each guest gets byte 0 onward by default and can redirect the
+ * guest — or, when a guest can't be reached directly (strict NAT, a network
+ * change), the same stream relayed through the server's socket connection. Each guest gets byte 0 onward by default and can redirect the
  * stream to any range (late join / far seek); chunks go out with
  * backpressure (BF-08). Replacing the file bumps the generation counter,
  * which aborts in-flight send loops and restarts every stream.
@@ -45,13 +56,25 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     if (peer) {
       try {
         peer.dc.close();
-        peer.pc.close();
+        peer.pc?.close();
       } catch {
         // already closed
       }
       peersRef.current.delete(guestId);
       setActiveStreams(peersRef.current.size);
     }
+  }, []);
+
+  /**
+   * The host's upload is shared by every viewer. Another viewer is short of
+   * data it needs for playback — and still receiving, i.e. not a dead link.
+   */
+  const othersUrgent = useCallback((self: PeerStream) => {
+    const now = Date.now();
+    for (const p of peersRef.current.values()) {
+      if (p !== self && p.job?.urgent && now - p.sentAt < URGENT_STALE_MS) return true;
+    }
+    return false;
   }, []);
 
   const streamFile = useCallback(async (guestId: string, peer: PeerStream) => {
@@ -93,14 +116,17 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
       const start = Math.max(0, Math.floor(Number(msg.start) || 0));
       const end = Math.min(file.size, Math.floor(Number(msg.end) || 0));
       // An empty range means "stop for now" (a streaming-only guest is far enough ahead).
-      peer.job = end > start ? { start, end } : null;
+      peer.job = end > start ? { start, end, urgent: msg.urgent !== false } : null;
+      // A newly urgent job gets its grace period to start flowing.
+      if (peer.job?.urgent) peer.sentAt = Date.now();
       peer.wake?.();
     };
     dc.addEventListener("close", () => peer.wake?.());
 
     try {
       dc.send(JSON.stringify({ type: "meta", fileId, name: file.name, size: file.size }));
-      peer.job = { start: 0, end: file.size };
+      peer.job = { start: 0, end: file.size, urgent: true };
+      peer.sentAt = Date.now();
       while (alive()) {
         const job: ByteRange | null = peer.job;
         if (!job) {
@@ -112,11 +138,21 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         const current = () => alive() && peer.job === job;
         let offset = job.start;
         while (offset < job.end && current()) {
+          // Stocking up waits while someone else needs data for playback.
+          while (!job.urgent && current() && othersUrgent(peer)) {
+            await new Promise<void>((resolve) => {
+              peer.wake = resolve;
+              setTimeout(resolve, 250);
+            });
+            peer.wake = null;
+          }
+          if (!current()) break;
           const slice = await file.slice(offset, Math.min(offset + FILE_READ_CHUNK, job.end)).arrayBuffer();
           for (let i = 0; i < slice.byteLength && current(); i += WIRE_CHUNK) {
             if (dc.bufferedAmount > HIGH_WATER_MARK) await waitDrain();
             if (!current()) break;
             dc.send(encodeChunk(offset + i, slice.slice(i, i + WIRE_CHUNK)));
+            peer.sentAt = Date.now();
           }
           offset += slice.byteLength;
         }
@@ -125,22 +161,39 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     } catch (e) {
       console.warn(`stream to ${guestId} aborted:`, e);
     }
-  }, []);
+  }, [othersUrgent]);
 
   const openStreamTo = useCallback(
-    async (guestId: string) => {
+    async (guestId: string, relay = false) => {
       const tag = `stream to ${guestId.slice(0, 5)}`;
       if (!fileRef.current) {
         diag(`${tag}: requested, but no file is loaded in this tab`);
         return;
       }
-      diag(`${tag}: opening`);
       teardownPeer(guestId);
 
+      if (relay) {
+        diag(`${tag}: relaying through the server`);
+        const peer: PeerStream = {
+          pc: null,
+          dc: new HostRelayChannel(socket, guestId),
+          relay: true,
+          generation: generationRef.current,
+          job: null,
+          wake: null,
+          sentAt: 0,
+        };
+        peersRef.current.set(guestId, peer);
+        setActiveStreams(peersRef.current.size);
+        streamFile(guestId, peer);
+        return;
+      }
+
+      diag(`${tag}: opening`);
       const pc = new RTCPeerConnection(RTC_CONFIG);
       const dc = pc.createDataChannel("media", { ordered: true });
       dc.binaryType = "arraybuffer";
-      const peer: PeerStream = { pc, dc, generation: generationRef.current, job: null, wake: null };
+      const peer: PeerStream = { pc, dc, relay: false, generation: generationRef.current, job: null, wake: null, sentAt: 0 };
       peersRef.current.set(guestId, peer);
       setActiveStreams(peersRef.current.size);
 
@@ -172,7 +225,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
 
     const onAnswer = async (d: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
       const peer = peersRef.current.get(d.fromSocketId);
-      if (peer) {
+      if (peer?.pc) {
         try {
           await peer.pc.setRemoteDescription(d.sdp);
         } catch (e) {
@@ -182,7 +235,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     };
     const onIce = async (d: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
       const peer = peersRef.current.get(d.fromSocketId);
-      if (peer && d.candidate) {
+      if (peer?.pc && d.candidate) {
         try {
           await peer.pc.addIceCandidate(d.candidate);
         } catch {
@@ -190,8 +243,17 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         }
       }
     };
-    const onStreamRequest = (d: { guestSocketId: string }) => {
-      openStreamTo(d.guestSocketId);
+    const onStreamRequest = (d: { guestSocketId: string; relay?: boolean }) => {
+      openStreamTo(d.guestSocketId, Boolean(d.relay));
+    };
+    // Relayed streams: range requests and acknowledgements from guests.
+    const onRelayData = (d: { fromSocketId: string; data: unknown }) => {
+      const peer = peersRef.current.get(d.fromSocketId);
+      if (peer?.relay && typeof d.data === "string") (peer.dc as HostRelayChannel).deliver(d.data);
+    };
+    const onRelayAck = (d: { fromSocketId: string; bytes: number }) => {
+      const peer = peersRef.current.get(d.fromSocketId);
+      if (peer?.relay) (peer.dc as HostRelayChannel).ack(Number(d.bytes) || 0);
     };
     const onLeave = (d: { user: { id: string } }) => teardownPeer(d.user.id);
 
@@ -199,11 +261,15 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     socket.on("rtc:ice", onIce);
     socket.on("stream:request", onStreamRequest);
     socket.on("room:leave", onLeave);
+    socket.on("relay:data", onRelayData);
+    socket.on("relay:ack", onRelayAck);
     return () => {
       socket.off("rtc:answer", onAnswer);
       socket.off("rtc:ice", onIce);
       socket.off("stream:request", onStreamRequest);
       socket.off("room:leave", onLeave);
+      socket.off("relay:data", onRelayData);
+      socket.off("relay:ack", onRelayAck);
     };
   }, [socket, joined, openStreamTo, teardownPeer]);
 
@@ -215,7 +281,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         const p = peers.get(id);
         try {
           p?.dc.close();
-          p?.pc.close();
+          p?.pc?.close();
         } catch {
           // ignore
         }

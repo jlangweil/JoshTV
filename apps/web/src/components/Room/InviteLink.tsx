@@ -30,7 +30,7 @@ export function CopyLinkButton({ roomId }: { roomId: string }) {
         // Last resort: show the link so it can be copied by hand.
         if (!(await copy())) window.prompt("Copy this invite link:", roomLink(roomId));
       }}
-      title={roomLink(roomId)}
+      title={`Copy the link friends use to join: ${roomLink(roomId)}`}
       aria-live="polite"
     >
       {status === "copied" ? "Link copied!" : "Copy invite link"}

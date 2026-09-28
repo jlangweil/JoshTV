@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { createRoom, getRoom, sweepIdleRooms, roomCount } from "./rooms.js";
 import { registerHandlers } from "./handlers.js";
 import { MAX_GUESTS } from "./types.js";
+import { logDirectory } from "./log.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const app = express();
@@ -66,6 +67,10 @@ const io = new Server(httpServer, {
   cors: { origin: "*" },
   // Allow chunky signaling payloads (SDP with many candidates, VTT uploads).
   maxHttpBufferSize: 4_000_000,
+  // Notice dead connections (a phone that left the browser, lost Wi-Fi) in
+  // ~20s instead of the default ~45s, so the room's viewer list stays accurate.
+  pingInterval: 10_000,
+  pingTimeout: 10_000,
 });
 
 io.on("connection", (socket) => registerHandlers(io, socket));
@@ -79,4 +84,5 @@ setInterval(() => {
 
 httpServer.listen(PORT, () => {
   console.log(`JoshTV server listening on http://localhost:${PORT}`);
+  console.log(`Logging to ${logDirectory()}`);
 });

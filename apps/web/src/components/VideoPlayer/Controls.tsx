@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { SeekBar } from "./SeekBar";
-import { ReactionBar } from "../Reactions/ReactionBar";
 import { PLAYBACK_SPEEDS } from "../../types";
 import { canSetVolume, isIOS } from "../../lib/platform";
 
@@ -22,7 +21,6 @@ interface Props {
   onFullscreen: () => void;
   onPip: () => void;
   onCaptionFile: (file: File) => void;
-  onReact: (emoji: string) => void;
   onRequestPause: () => void;
   onToggleChat: () => void;
   unreadCount: number;
@@ -31,7 +29,7 @@ interface Props {
 
 export function Controls(p: Props) {
   const captionInput = useRef<HTMLInputElement>(null);
-  // Compact (reactions behind one button, no volume slider) exactly when the
+  // Compact (no volume slider, no PiP button) exactly when the
   // full set of buttons wouldn't fit on one row — measured, not a media query,
   // since the chat narrows the player on any screen. Keeping one row keeps the
   // picture as tall as possible.
@@ -74,7 +72,13 @@ export function Controls(p: Props) {
             onClick={p.playing ? p.onPause : p.onPlay}
             disabled={!p.playing && !p.canPlay}
             aria-label={p.playing ? "Pause" : "Play"}
-            title={!p.playing && !p.canPlay ? "Load a video first" : undefined}
+            title={
+              p.playing
+                ? "Pause for everyone (Space)"
+                : p.canPlay
+                  ? "Play for everyone (Space)"
+                  : "Load a video first"
+            }
           >
             {p.playing ? "⏸" : "▶"}
           </button>
@@ -84,7 +88,7 @@ export function Controls(p: Props) {
             className={`${btn} text-lg`}
             onClick={p.onRequestPause}
             aria-label="Request a pause"
-            title="Raise a hand to request a pause"
+            title="Ask the host to pause"
           >
             {"✋"}
           </button>
@@ -96,6 +100,7 @@ export function Controls(p: Props) {
             className={btn}
             onClick={p.onMute}
             aria-label={p.muted ? "Unmute" : "Mute"}
+            title={p.muted ? "Unmute (just for you)" : "Mute (just for you)"}
             data-audio-control
           >
             {p.muted ? "\u{1F507}" : "\u{1F50A}"}
@@ -110,6 +115,7 @@ export function Controls(p: Props) {
               step={0.05}
               value={p.muted ? 0 : p.volume}
               aria-label="Volume"
+              title="Volume (just for you)"
               data-audio-control
               onChange={(e) => p.onVolume(Number(e.target.value))}
             />
@@ -121,6 +127,7 @@ export function Controls(p: Props) {
             className="touch-target rounded-lg border border-cinema-surface bg-cinema-panel px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-cinema-accent"
             value={p.speed}
             aria-label="Playback speed"
+            title="Playback speed for everyone"
             onChange={(e) => p.onSpeed(Number(e.target.value))}
           >
             {PLAYBACK_SPEEDS.map((s) => (
@@ -130,12 +137,13 @@ export function Controls(p: Props) {
             ))}
           </select>
         ) : (
-          <span className="font-mono text-xs text-cinema-muted">{p.speed}x</span>
+          <span className="font-mono text-xs text-cinema-muted" title="Playback speed (set by the host)">
+            {p.speed}x
+          </span>
         )}
 
         <div className="grow" data-spacer />
 
-        <ReactionBar onReact={p.onReact} compact={compact} />
 
         {p.isHost && (
           <>
@@ -144,7 +152,7 @@ export function Controls(p: Props) {
               className={btn}
               onClick={() => captionInput.current?.click()}
               aria-label="Load subtitles"
-              title="Load .vtt or .srt subtitles"
+              title="Load subtitles (.srt or .vtt) for everyone"
             >
               CC
             </button>
@@ -169,17 +177,35 @@ export function Controls(p: Props) {
 
         {/* Least-used control: leaves the bar when space is tight (it returns when there's room). */}
         {!compact && (
-          <button type="button" className={btn} onClick={p.onPip} aria-label="Picture in picture">
+          <button
+            type="button"
+            className={btn}
+            onClick={p.onPip}
+            aria-label="Picture in picture"
+            title="Picture in picture: keep watching in a small floating window"
+          >
             PiP
           </button>
         )}
-        <button type="button" className={btn} onClick={p.onToggleChat} aria-label="Toggle chat">
+        <button
+          type="button"
+          className={btn}
+          onClick={p.onToggleChat}
+          aria-label="Toggle chat"
+          title={p.unreadCount > 0 ? `Show or hide chat (C) · ${p.unreadCount} unread` : "Show or hide chat (C)"}
+        >
           {"\u{1F4AC}"}
           {p.unreadCount > 0 && (
             <span className="ml-1 rounded-full bg-cinema-accent px-1.5 text-xs text-white">{p.unreadCount}</span>
           )}
         </button>
-        <button type="button" className={btn} onClick={p.onFullscreen} aria-label="Toggle fullscreen">
+        <button
+          type="button"
+          className={btn}
+          onClick={p.onFullscreen}
+          aria-label="Toggle fullscreen"
+          title="Fullscreen on/off (F, or double-click / double-tap the picture)"
+        >
           {"⛶"}
         </button>
       </div>

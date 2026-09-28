@@ -4,22 +4,23 @@ import {
   computeExpectedTime,
   needsCorrection,
   needsCatchUpPause,
-  caughtUp,
   driftSeconds,
-  bufferedAhead,
-  flattenTimeRanges,
 } from "../lib/sync";
 
 /** Don't issue corrective seeks more often than this — prevents flapping. */
 const CORRECTION_COOLDOWN_MS = 2500;
-/** Resume from "catching up" only with this much media buffered ahead. */
+/** "Buffered at the target" means at least this much media from there on. */
 const RESUME_BUFFER_S = 2;
 /**
- * While catching up the video is paused and the room keeps moving, so aim a
- * little ahead: the room then arrives at the parked frame, instead of every
+ * While catching up, the room keeps moving as the video waits for data, so
+ * aim a little ahead: the room then arrives at that spot, instead of every
  * seek landing behind again.
  */
 const CATCH_UP_LEAD_S = 0.4;
+/** Catching up this long means something is wrong: report it and try to recover. */
+const STUCK_RECOVER_MS = 12_000;
+/** Still stuck after this: offer the viewer a reload. */
+const STUCK_GIVE_UP_MS = 30_000;
 
 /**
  * Guest-side drift correction loop (SP-05..SP-07), driven by the Fable
@@ -31,13 +32,20 @@ export function useDriftSync(
   serverNow: () => number,
   enabled: boolean,
   /** Browser refused playback (no user interaction yet, or iOS Low Power Mode). */
-  onAutoplayBlocked?: (video: HTMLVideoElement) => void
-): { catchingUp: boolean } {
+  onAutoplayBlocked?: (video: HTMLVideoElement) => void,
+  /** Catching up has taken far too long: diagnose and try to recover the player. */
+  onStuck?: (video: HTMLVideoElement, expected: number) => void
+): { catchingUp: boolean; stuck: boolean } {
   const [catchingUp, setCatchingUp] = useState(false);
+  const [stuck, setStuck] = useState(false);
   const catchingUpRef = useRef(false);
+  const catchSinceRef = useRef(0);
+  const recoveredRef = useRef(false);
   const lastCorrectionRef = useRef(0);
   const onBlockedRef = useRef(onAutoplayBlocked);
   onBlockedRef.current = onAutoplayBlocked;
+  const onStuckRef = useRef(onStuck);
+  onStuckRef.current = onStuck;
 
   useEffect(() => {
     if (!enabled) return;
@@ -52,12 +60,15 @@ export function useDriftSync(
       if (catchingUpRef.current !== value) {
         catchingUpRef.current = value;
         setCatchingUp(value);
+        catchSinceRef.current = Date.now();
+        recoveredRef.current = false;
+        if (!value) setStuck(false);
       }
     };
 
     const tick = () => {
       const video = videoRef.current;
-      if (!video || !playbackState || video.readyState === 0) return;
+      if (!video || !playbackState) return;
 
       const expected = computeExpectedTime(
         playbackState.playing,
@@ -66,6 +77,18 @@ export function useDriftSync(
         playbackState.updatedAt,
         serverNow()
       );
+
+      // Stuck watchdog — runs even when the element has no data at all
+      // (readyState 0), which is exactly when it matters.
+      if (catchingUpRef.current) {
+        const waited = Date.now() - catchSinceRef.current;
+        if (!recoveredRef.current && waited > STUCK_RECOVER_MS) {
+          recoveredRef.current = true;
+          onStuckRef.current?.(video, expected);
+        }
+        if (waited > STUCK_GIVE_UP_MS) setStuck(true);
+      }
+      if (video.readyState === 0) return;
       const actual = video.currentTime;
       const now = Date.now();
       const canCorrect = now - lastCorrectionRef.current > CORRECTION_COOLDOWN_MS;
@@ -88,29 +111,30 @@ export function useDriftSync(
       }
 
       // Playing.
-      const ahead = bufferedAhead(flattenTimeRanges(video.buffered), actual);
 
       if (catchingUpRef.current) {
-        // SP-07 recovery: resume only once re-buffered at the right position,
-        // with enough runway that we won't immediately stall again.
-        if (video.readyState >= 3 && caughtUp(expected, actual) && ahead >= RESUME_BUFFER_S) {
+        // SP-07: the element is kept *playing* while it lands — iOS doesn't
+        // buffer a paused video, so waiting paused for data could wait forever.
+        // Done once it is actually playing, with data, at the right spot.
+        if (!video.paused && video.readyState >= 3 && driftSeconds(expected, actual) < 1) {
           setCatching(false);
-          tryPlay(video);
-        } else if (driftSeconds(expected, actual) > 0.5) {
-          // Paused anyway, so re-seeking is harmless: do it as soon as the
-          // target is buffered (e.g. the stream just delivered it, or an iPad
-          // is back from the background) rather than waiting out the cooldown.
+          return;
+        }
+        if (driftSeconds(expected, actual) > 1) {
+          // The room moved on while we waited: aim again, as soon as the
+          // target is buffered rather than waiting out the cooldown.
           const target = expected + CATCH_UP_LEAD_S;
           if (canCorrect || isBufferedAt(video.buffered, target)) correct(target);
         }
+        if (video.paused) tryPlay(video);
         return;
       }
 
       if (needsCatchUpPause(expected, actual)) {
         if (!canCorrect) return;
         setCatching(true);
-        video.pause();
-        correct(expected);
+        correct(expected + CATCH_UP_LEAD_S);
+        if (video.paused) tryPlay(video);
       } else if (needsCorrection(expected, actual)) {
         // SP-06: silent re-seek.
         if (canCorrect) correct(expected);
@@ -124,7 +148,7 @@ export function useDriftSync(
     return () => clearInterval(interval);
   }, [videoRef, playbackState, serverNow, enabled]);
 
-  return { catchingUp };
+  return { catchingUp, stuck };
 }
 
 function isBufferedAt(ranges: TimeRanges, t: number): boolean {

@@ -11,7 +11,7 @@ export interface AssemblerCallbacks {
   onComplete: () => void;
   onError: (message: string) => void;
   /** Ask the host to send [start, end) next, replacing the current range. */
-  requestRange: (start: number, end: number) => void;
+  requestRange: (start: number, end: number, urgent: boolean) => void;
   /** Diagnostic event line (sent to the server log). */
   log: (message: string) => void;
 }
@@ -50,6 +50,17 @@ const MAX_BYTES_BEFORE_INDEX = 32 * 1024 * 1024;
 const SEEK_COOLDOWN_MS = 2000;
 /** A target this close past what's been fed is reached by feeding, not seeking. */
 const SEEK_SLACK_S = 8;
+/**
+ * A jump aims this far ahead of the room, so the room hasn't moved past the
+ * target by the time its data arrives. Doubles (up to the max) each time the
+ * room overtakes a jump that was still downloading — without that, a slow link
+ * re-jumps every couple of seconds, restarting the download each time, and
+ * never catches up.
+ */
+const SEEK_LEAD_MIN_S = 2;
+const SEEK_LEAD_MAX_S = 60;
+/** Missing bytes within this much playback time of the feed position are urgent. */
+const URGENT_AHEAD_S = 45;
 /** Headroom to leave when deciding whether the movie fits in disk storage. */
 const DISK_MARGIN_BYTES = 64 * 1024 * 1024;
 /** On iOS without disk storage, bigger movies aren't kept whole (RAM would run out). */
@@ -89,6 +100,8 @@ export class StreamAssembler {
 
   /** Range the host is currently sending, and how far into it we've got. */
   private job: ByteRange | null = null;
+  private jobUrgent = true;
+  private lastDataAt = 0;
   private jobCursor = 0;
   private bytesPerSecond = 0;
   private rateWindow = { at: 0, bytes: 0 };
@@ -111,6 +124,13 @@ export class StreamAssembler {
   /** Media time (s) reached by the segments produced so far; null right after a seek. */
   private segmentEnd: number | null = null;
   private lastSeekAt = -Infinity;
+  /** Room time the last jump aimed at; the room is on its way there. */
+  private seekTarget: number | null = null;
+  /** Where the room was when that jump was made. */
+  private seekFrom = 0;
+  private seekLead = SEEK_LEAD_MIN_S;
+  /** The room's position is advancing (playing), judged from successive ticks. */
+  private roomMoving = false;
 
   // ---- Recovery when the browser breaks the video pipeline ----
   // iOS can tear down a backgrounded page's decoder ("Media failed to decode"),
@@ -130,9 +150,38 @@ export class StreamAssembler {
     private cb: AssemblerCallbacks
   ) {}
 
-  /** A requested range is still outstanding (silence from the host now means trouble). */
+  /**
+   * An urgent range is still outstanding, so silence from the host now means
+   * trouble. (Stocking up is paused by the host while other viewers need its
+   * upload — that silence is expected.)
+   */
   get expectingData(): boolean {
-    return !this.complete && this.job !== null && this.jobCursor < this.job.end;
+    return !this.complete && this.jobUrgent && this.job !== null && this.jobCursor < this.job.end;
+  }
+
+  /**
+   * Playback is stuck (the room's "catching up" watchdog fired): rebuild the
+   * progressive pipeline. Returns false when not streaming progressively.
+   */
+  recover(reason: string): boolean {
+    if (this.disposed || this.complete || this.mseFailed || this.mode !== "mse") return false;
+    if (this.fetchingJump) {
+      // Not broken, just a slow download: rebuilding would only lose progress.
+      this.cb.log(`${reason}: still downloading where the room is (${this.rateText()})`);
+      return true;
+    }
+    this.restartMse(reason);
+    return true;
+  }
+
+  /** A jump hasn't landed yet but its data is arriving (slow link, not a broken pipeline). */
+  get fetchingJump(): boolean {
+    return !this.complete && this.seekTarget !== null && performance.now() - this.lastDataAt < 5000;
+  }
+
+  private rateText(): string {
+    const need = this.mediaBytesPerSecond();
+    return `downloading at ${(this.bytesPerSecond / 1e6).toFixed(2)}MB/s` + (need > 0 ? `, movie plays ${(need / 1e6).toFixed(2)}MB/s` : "");
   }
 
   /** How downloaded bytes are kept; "window" = streaming only, never assembled. */
@@ -216,6 +265,7 @@ export class StreamAssembler {
     this.releaseMse();
     this.info = null;
     this.segmentEnd = null;
+    this.seekTarget = null;
     this.initMse();
     const box = this.box as ISOFile | null;
     if (!box) return;
@@ -242,6 +292,7 @@ export class StreamAssembler {
     // redirect right away; streaming-only may need nothing, so it must know
     // the host is sending in order to tell it to stop.
     this.job = this.store.kind === "window" ? { start: 0, end: this.totalBytes } : null;
+    this.jobUrgent = true;
     this.jobCursor = 0;
     this.rateWindow = { at: performance.now(), bytes: 0 };
     this.scheduleDownload();
@@ -289,6 +340,7 @@ export class StreamAssembler {
     }
     const added = this.store.add(offset, buffer); // may take ownership of buffer
     if (added) {
+      this.lastDataAt = performance.now();
       this.receivedBytes += added;
       this.trackRate(added);
       this.cb.onProgress(this.receivedBytes, this.totalBytes);
@@ -308,7 +360,10 @@ export class StreamAssembler {
   /** Called every ~500ms with the room's current position (null if unknown). */
   tick(roomTime: number | null): void {
     if (this.disposed || this.complete) return;
-    if (roomTime !== null) this.lastRoomTime = roomTime;
+    if (roomTime !== null) {
+      this.roomMoving = this.lastRoomTime !== null && Math.abs(roomTime - this.lastRoomTime) > 0.05;
+      this.lastRoomTime = roomTime;
+    }
     if (this.mode === "mse" && !this.mseFailed) {
       const video = this.getVideo();
       const ours = video !== null && this.mseUrl !== null && video.currentSrc === this.mseUrl;
@@ -336,6 +391,7 @@ export class StreamAssembler {
 
   private scheduleDownload(): void {
     if (this.complete || this.finishing) return;
+    const urgentBytes = Math.max(PRIORITY_BYTES, this.mediaBytesPerSecond() * URGENT_AHEAD_S);
     if (this.store.kind === "window") {
       // Streaming only: fetch what's missing just ahead of playback, nothing else.
       const ahead = Math.max(WINDOW_MIN_AHEAD_BYTES, this.mediaBytesPerSecond() * WINDOW_AHEAD_S);
@@ -345,41 +401,48 @@ export class StreamAssembler {
         // Everything playback needs soon is here: make sure the host is idle.
         if (this.job) {
           this.job = null;
-          this.cb.requestRange(0, 0);
+          this.cb.requestRange(0, 0, false);
         }
         return;
       }
+      const urgent = gap.start - this.feedCursor < urgentBytes;
       const heading =
         this.job !== null &&
         this.jobCursor <= gap.start &&
         gap.start < this.job.end &&
         gap.start - this.jobCursor < 4 * 1024 * 1024;
-      if (!heading) this.requestRange(gap);
+      if (!heading || (urgent && !this.jobUrgent)) this.requestRange(gap, urgent);
       return;
     }
     const need = this.store.firstGap(this.feedCursor, this.totalBytes);
-    if (need && need.start - this.feedCursor < PRIORITY_BYTES) {
-      // Playback needs these bytes soon: make sure the host is on its way there.
+    if (need && need.start - this.feedCursor < urgentBytes) {
+      // Playback needs these bytes soon: make sure the host is on its way there, urgently.
       const lookahead = Math.max(4 * 1024 * 1024, this.bytesPerSecond * 8);
       const heading =
         this.job !== null &&
         this.jobCursor <= need.start &&
         need.start < this.job.end &&
         need.start - this.jobCursor < lookahead;
-      if (!heading) this.requestRange(need);
+      if (!heading) this.requestRange(need, true);
+      else if (!this.jobUrgent) this.requestRange({ start: this.jobCursor, end: this.job!.end }, true);
       return;
     }
-    // Nothing urgent: continue forward from playback, then backfill from 0.
-    if (!this.job) {
+    // Nothing urgent: continue forward from playback, then backfill from 0 —
+    // at low priority, so it only uses upload no other viewer urgently needs.
+    if (this.job && this.jobUrgent) {
+      this.requestRange({ start: this.jobCursor, end: this.job.end }, false);
+    } else if (!this.job) {
       const gap = this.store.firstGap(this.feedCursor, this.totalBytes) ?? this.store.firstGap(0, this.totalBytes);
-      if (gap) this.requestRange(gap);
+      if (gap) this.requestRange(gap, false);
     }
   }
 
-  private requestRange(range: ByteRange): void {
+  private requestRange(range: ByteRange, urgent: boolean): void {
+    if (range.end <= range.start) return;
     this.job = range;
+    this.jobUrgent = urgent;
     this.jobCursor = range.start;
-    this.cb.requestRange(range.start, range.end);
+    this.cb.requestRange(range.start, range.end, urgent);
   }
 
   private trackRate(bytes: number): void {
@@ -449,24 +512,66 @@ export class StreamAssembler {
     }
   }
 
-  /** Re-point mp4box when the room is somewhere MSE doesn't have and feeding won't reach soon. */
+  /**
+   * Re-point mp4box when the room is somewhere MSE doesn't have and feeding
+   * won't reach soon. Jumps aim a little ahead of the room and are then left
+   * alone until the room gets there, so their data has time to arrive.
+   */
   private ensureSeek(time: number): void {
     if (this.mseFailed || !this.box || !this.info || this.tracks.length === 0) return;
     const video = this.getVideo();
-    if (video && isBuffered(video.buffered, time)) return;
+    const target = this.seekTarget;
+    if (target !== null && time >= this.seekFrom - 0.5 && time <= target && target - time <= this.seekLead + SEEK_SLACK_S) {
+      // The room is on its way to the last jump (whose data may still be arriving).
+      return;
+    }
+    if (video && isBuffered(video.buffered, time)) {
+      if (target !== null && time > target) {
+        // Landed: the jump worked. Ease the lead back down for next time.
+        this.seekTarget = null;
+        this.seekLead = Math.max(SEEK_LEAD_MIN_S, this.seekLead * 0.75);
+      }
+      return;
+    }
     if (this.segmentEnd !== null && time >= this.segmentEnd - 1 && time - this.segmentEnd < SEEK_SLACK_S) return;
     const now = performance.now();
     if (now - this.lastSeekAt < SEEK_COOLDOWN_MS) return;
+    let overtaken = false;
+    if (target !== null && time > target && time - target < SEEK_LEAD_MAX_S * 2) {
+      // The room passed our target before playback got there: the download is
+      // slower than we aimed for. Aim further ahead this time.
+      overtaken = true;
+      this.seekLead = Math.min(SEEK_LEAD_MAX_S, this.seekLead * 2);
+    }
+    const duration = this.info.timescale > 0 ? this.info.duration / this.info.timescale : Infinity;
     let offset: number;
+    let aim = time;
     try {
       offset = this.box.seek(time, true).offset;
+      // Aim ahead only when the room is moving and the data must still be
+      // fetched — landing exactly on the room plays soonest when it's here.
+      const mediaRate = this.mediaBytesPerSecond();
+      const have = this.store.contiguousEnd(offset) - offset;
+      if (this.roomMoving && have < Math.max(1024 * 1024, mediaRate * 4)) {
+        const fast = !overtaken && mediaRate > 0 && this.bytesPerSecond > 4 * mediaRate;
+        const lead = fast ? Math.min(1, this.seekLead) : this.seekLead;
+        aim = Math.min(time + lead, Math.max(time, duration - 1));
+        offset = this.box.seek(aim, true).offset;
+      }
     } catch {
       return;
     }
     this.lastSeekAt = now;
     this.segmentEnd = null;
+    this.seekTarget = aim;
+    this.seekFrom = time;
     this.feedCursor = offset;
-    this.cb.log(`jump to ${time.toFixed(0)}s (byte ${(offset / 1e6).toFixed(0)}MB, have ${this.store.contiguousEnd(offset) > offset ? "data" : "nothing"} there)`);
+    this.cb.log(
+      `jump to ${aim.toFixed(0)}s (room at ${time.toFixed(0)}s, byte ${(offset / 1e6).toFixed(0)}MB, ` +
+        `have ${this.store.contiguousEnd(offset) > offset ? "data" : "nothing"} there` +
+        (overtaken ? `; room overtook the last jump, ${this.rateText()}` : "") +
+        ")"
+    );
     this.scheduleDownload();
     void this.pumpFeed();
   }

@@ -1,6 +1,8 @@
 import { Server, Socket } from "socket.io";
 import { randomUUID } from "node:crypto";
 import { getRoom, pushChat, systemMessage, touch, deleteRoom } from "./rooms.js";
+import { currentWebBuild } from "./build.js";
+import { logLine } from "./log.js";
 import {
   Room,
   RoomUser,
@@ -21,13 +23,14 @@ interface SocketCtx {
   diagTimes: number[];
 }
 
-/** One console line per event, tagged with room and person. */
-function logLine(roomId: string | null, who: string, text: string): void {
-  const time = new Date().toISOString().slice(11, 19);
-  console.log(`${time} [${roomId ?? "------"}] ${who || "?"}: ${text}`);
-}
 
 const ctxBySocket = new Map<string, SocketCtx>();
+
+/** Where a socket comes from, for log lines about people who never got in. */
+function origin(socket: Socket): string {
+  const ua = String(socket.handshake.headers["user-agent"] ?? "?");
+  return `${socket.handshake.address} | ${ua.slice(0, 160)}`;
+}
 
 function usersPayload(room: Room) {
   return [...room.users.values()].map((u) => ({
@@ -53,7 +56,7 @@ function requestMissingStreams(io: Server, room: Room): void {
   if (!room.fileMeta || !room.hostSocketId || !room.streamToGuests) return;
   for (const u of room.users.values()) {
     if (u.isHost || room.guestBufferStates.get(u.socketId)?.complete) continue;
-    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: u.socketId });
+    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: u.socketId, relay: Boolean(u.relay) });
   }
 }
 
@@ -91,18 +94,40 @@ export function registerHandlers(io: Server, socket: Socket): void {
          * chose "Host here instead".
          */
         takeover?: boolean;
+        /** Build of the page (hashed bundle name); null in dev. Missing = a pre-check client. */
+        build?: string | null;
+        /** This page has already joined once (a reconnect): don't interrupt it. */
+        rejoin?: boolean;
+        /** Guest: direct connections to the host have failed; relay through the server. */
+        relay?: boolean;
       },
       ack?: (res: { ok: boolean; error?: string }) => void
     ) => {
-      const room = getRoom(String(data?.roomId ?? ""));
-      if (!room) return ack?.({ ok: false, error: "Room not found" });
-
       const name = String(data?.name ?? "").slice(0, 24).trim() || "Anonymous";
       const color = String(data?.color ?? "#A8DADC").slice(0, 9);
+      const reject = (error: string, why = error) => {
+        logLine(String(data?.roomId ?? "").slice(0, 6).toUpperCase() || null, name, `join refused: ${why} (${origin(socket)})`);
+        ack?.({ ok: false, error });
+      };
+
+      const room = getRoom(String(data?.roomId ?? ""));
+      if (!room) return reject("Room not found");
+
+      // A page running an old cached copy of the app may not speak the current
+      // stream protocol (it would sit on "catching up" forever): have it reload.
+      const serverBuild = currentWebBuild();
+      if (serverBuild && !data?.rejoin) {
+        if (!data || !("build" in data)) {
+          return reject("This page is out of date. Please reload it (pull down, or tap refresh).", "out-of-date app (no build id)");
+        }
+        if (data.build && data.build !== serverBuild) {
+          return reject("stale-build", `stale build ${data.build}, serving ${serverBuild}`);
+        }
+      }
 
       if (data.isHost) {
         if (data.hostToken !== room.hostToken) {
-          return ack?.({ ok: false, error: "Invalid host token" });
+          return reject("Invalid host token");
         }
         // The host token lives in the browser, so a second tab (or window) on
         // the host's machine arrives with it too. Never let that silently
@@ -116,7 +141,7 @@ export function registerHandlers(io: Server, socket: Socket): void {
             .emitWithAck("host:ping")
             .then(() => true)
             .catch(() => false);
-          if (alive) return ack?.({ ok: false, error: "host-elsewhere" });
+          if (alive) return reject("host-elsewhere", "another tab is hosting (asked to choose)");
         }
         if (prev?.connected) {
           // The old tab stays in the room as a viewer and is told why.
@@ -142,7 +167,7 @@ export function registerHandlers(io: Server, socket: Socket): void {
       } else {
         const guestCount = [...room.users.values()].filter((u) => !u.isHost).length;
         if (guestCount >= MAX_GUESTS) {
-          return ack?.({ ok: false, error: "Room is full" });
+          return reject("Room is full");
         }
       }
 
@@ -151,13 +176,17 @@ export function registerHandlers(io: Server, socket: Socket): void {
       ctx.name = name;
       ctx.color = color;
 
-      const user: RoomUser = { socketId: socket.id, name, color, isHost: data.isHost };
+      const user: RoomUser = { socketId: socket.id, name, color, isHost: data.isHost, relay: !data.isHost && Boolean(data.relay) };
       room.users.set(socket.id, user);
       touch(room);
       socket.join(room.roomId);
 
       ack?.({ ok: true });
-      logLine(room.roomId, name, `joined as ${data.isHost ? "host" : "guest"} (socket ${socket.id})`);
+      logLine(
+        room.roomId,
+        name,
+        `joined as ${data.isHost ? "host" : "guest"} (socket ${socket.id}, ${socket.handshake.address})`
+      );
 
       // Full state for the joiner (sync:state on join/reconnect).
       socket.emit("sync:state", {
@@ -186,9 +215,9 @@ export function registerHandlers(io: Server, socket: Socket): void {
         room.streamToGuests &&
         data.mediaFileId !== room.fileMeta.id
       ) {
-        // Ask the host to open a WebRTC stream toward this guest. Guests that
+        // Ask the host to open a stream toward this guest. Guests that
         // reconnect already holding the file (download or local copy) skip it.
-        io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id });
+        io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id, relay: user.relay });
       }
     }
   );
@@ -296,11 +325,39 @@ export function registerHandlers(io: Server, socket: Socket): void {
   });
 
   // Guest's stream stalled (connection dropped while it was in the background, etc.).
-  socket.on("guest:stream-request", () => {
+  // relay: direct connections keep failing — from now on, route through here.
+  socket.on("guest:stream-request", (data?: { relay?: boolean }) => {
     const room = currentRoom();
     if (!room || ctx.isHost || !room.fileMeta || !room.hostSocketId || !room.streamToGuests) return;
     if (room.guestBufferStates.get(socket.id)?.complete) return;
-    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id });
+    const user = room.users.get(socket.id);
+    if (user && data?.relay && !user.relay) {
+      user.relay = true;
+      logLine(room.roomId, ctx.name, "direct connection failing: relaying the movie through the server");
+    }
+    io.to(room.hostSocketId).emit("stream:request", { guestSocketId: socket.id, relay: Boolean(user?.relay) });
+  });
+
+  // ---- Stream relay (fallback when a direct WebRTC connection can't be made) ----
+  // Same protocol as the data channel, carried over the sockets instead. Only
+  // between the room's host and its own guests.
+  socket.on("relay:to-guest", (data: { guestId: string; data: unknown }) => {
+    const room = currentRoom();
+    if (!room || !requireHost(room, socket)) return;
+    const guest = room.users.get(String(data?.guestId));
+    if (!guest || guest.isHost) return;
+    io.to(guest.socketId).emit("relay:data", { data: data.data });
+  });
+  socket.on("relay:to-host", (data: { data: unknown }) => {
+    const room = currentRoom();
+    if (!room || ctx.isHost || !room.hostSocketId || !room.users.has(socket.id)) return;
+    if (typeof data?.data !== "string" || data.data.length > 1000) return; // control messages only
+    io.to(room.hostSocketId).emit("relay:data", { fromSocketId: socket.id, data: data.data });
+  });
+  socket.on("relay:ack", (data: { bytes: number }) => {
+    const room = currentRoom();
+    if (!room || ctx.isHost || !room.hostSocketId || !room.users.has(socket.id)) return;
+    io.to(room.hostSocketId).emit("relay:ack", { fromSocketId: socket.id, bytes: Number(data?.bytes) || 0 });
   });
 
   // ---- Guest buffer reports (BF-02/BF-03) ----

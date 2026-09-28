@@ -47,6 +47,8 @@ export interface Reaction {
 }
 
 export const REACTION_EMOJIS = ["\u{1F44F}", "\u{1F602}", "\u{1F631}", "\u{2764}\u{FE0F}", "\u{1F525}"];
+/** What each reaction means, for tooltips (same order as REACTION_EMOJIS). */
+export const REACTION_NAMES = ["Applause", "Laughing", "Shocked", "Love it", "Fire"];
 
 export const AVATAR_COLORS = [
   "#FFB3BA", "#FFDFBA", "#FFFFBA", "#BAFFC9", "#BAE1FF", "#E2BAFF",

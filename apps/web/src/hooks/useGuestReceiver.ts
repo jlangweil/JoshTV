@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState, RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, MutableRefObject, RefObject } from "react";
 import { Socket } from "socket.io-client";
 import { RTC_CONFIG, parseControl, decodeChunk } from "../lib/streamProtocol";
 import { StreamAssembler } from "../lib/StreamAssembler";
 import { diag, mb } from "../lib/diag";
+import { GuestRelayChannel, StreamChannel } from "../lib/relayChannel";
 
 export interface ReceiverState {
   src: string | null;
@@ -36,6 +37,8 @@ const EMPTY: ReceiverState = {
 const STALL_MS = 6000;
 /** Don't ask the host for a fresh stream more often than this. */
 const REQUEST_COOLDOWN_MS = 8000;
+/** A new direct connection gets this long to connect (remote ICE can take a few seconds). */
+const CONNECT_TIMEOUT_MS = 12_000;
 
 /**
  * Guest side: answers the host's WebRTC offer, feeds incoming chunks to the
@@ -56,11 +59,25 @@ export function useGuestReceiver(
   /** Where the room is right now (seconds), so a late joiner fetches that part first. */
   getRoomTime: () => number | null,
   /** The host is connected and streaming to viewers. */
-  streamAvailable: boolean
-): ReceiverState & { loadLocalFile: (file: File) => void } {
+  streamAvailable: boolean,
+  /**
+   * Relay the movie through the server instead of a direct connection. Set
+   * here when direct connections fail; also sent when (re)joining the room.
+   */
+  relayRef: MutableRefObject<boolean>,
+  /** sessionStorage key remembering relay mode for this room across reloads. */
+  relayStorageKey: string
+): ReceiverState & {
+  loadLocalFile: (file: File) => void;
+  recoverPlayback: (reason: string) => boolean;
+  slowDownload: () => boolean;
+} {
   const [state, setState] = useState<ReceiverState>(EMPTY);
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<RTCDataChannel | null>(null);
+  const dcRef = useRef<StreamChannel | null>(null);
+  /** Direct-connection attempts that failed or stalled since the last success. */
+  const p2pFailuresRef = useRef(0);
+  const offerAtRef = useRef(0);
   const assemblerRef = useRef<StreamAssembler | null>(null);
   const localRef = useRef<{ fileId: string | null; url: string } | null>(null);
   const mediaFileIdRef = useRef<string | null>(null);
@@ -98,20 +115,46 @@ export function useGuestReceiver(
     if (!joined) return;
     lastActivityRef.current = Date.now();
 
-    const handleControl = (raw: string, pc: RTCPeerConnection) => {
+    /** Drop the current transport (direct connection or relay). */
+    const closeTransport = () => {
+      pcRef.current?.close();
+      pcRef.current = null;
+      dcRef.current?.close();
+      dcRef.current = null;
+    };
+
+    /** Direct connections aren't working from here: route the movie through the server. */
+    const switchToRelay = (reason: string) => {
+      if (!relayRef.current) {
+        relayRef.current = true;
+        try {
+          sessionStorage.setItem(relayStorageKey, "1");
+        } catch {
+          // not remembered across reloads
+        }
+        diag(`direct connection failed (${reason}): switching to relay through the server`);
+      }
+      pcRef.current?.close();
+      pcRef.current = null;
+      lastRequestRef.current = Date.now();
+      lastActivityRef.current = Date.now();
+      socket.emit("guest:stream-request", { relay: true });
+    };
+
+    const handleControl = (raw: string) => {
       const msg = parseControl(raw);
       if (!msg) return;
       if (msg.type === "meta") {
         if (localRef.current && localRef.current.fileId === msg.fileId) {
           // Already playing our own copy of this file — decline the stream.
-          pc.close();
+          closeTransport();
           return;
         }
         const existing = assemblerRef.current;
         if (existing && mediaFileIdRef.current === msg.fileId) {
           // Reconnected stream for the same file: keep what we have.
           diag(`stream reconnected: ${existing.complete ? "already complete" : `resuming at ${mb(existing.receivedBytes)}`}`);
-          if (existing.complete) pc.close();
+          if (existing.complete) closeTransport();
           else existing.resume();
           return;
         }
@@ -120,11 +163,18 @@ export function useGuestReceiver(
         const assembler: StreamAssembler = new StreamAssembler(() => videoRef.current, {
           onSourceChanged: (src, mode) => setState((s) => ({ ...s, src, mode, managed: assembler.managed })),
           onProgress: (receivedBytes, totalBytes) => setState((s) => ({ ...s, receivedBytes, totalBytes })),
-          onComplete: () => setState((s) => ({ ...s, complete: true })),
+          onComplete: () => {
+            setState((s) => ({ ...s, complete: true }));
+            // The whole movie is here: the connection to the host is no longer
+            // needed (left open, it just idles and eventually drops).
+            diag("closing the stream connection (have the whole file)");
+            // (The current connection — the download may have resumed on a newer one.)
+            closeTransport();
+          },
           onError: (error) => setState((s) => ({ ...s, error })),
-          requestRange: (start, end) => {
+          requestRange: (start, end, urgent) => {
             const dc = dcRef.current;
-            if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "range", start, end }));
+            if (dc?.readyState === "open") dc.send(JSON.stringify({ type: "range", start, end, urgent }));
           },
           log: diag,
         });
@@ -141,9 +191,18 @@ export function useGuestReceiver(
       pcRef.current?.close();
       const pc = new RTCPeerConnection(RTC_CONFIG);
       pcRef.current = pc;
+      dcRef.current = null;
       lastActivityRef.current = Date.now();
+      offerAtRef.current = Date.now();
       diag("stream offer received");
-      pc.onconnectionstatechange = () => diag(`stream connection: ${pc.connectionState}`);
+      pc.onconnectionstatechange = () => {
+        diag(`stream connection: ${pc.connectionState}`);
+        if (pc.connectionState === "connected") p2pFailuresRef.current = 0;
+        // Can't be re-established directly (e.g. a strict router, a network change): relay.
+        if (pc.connectionState === "failed" && pcRef.current === pc && !completeRef.current && !localRef.current) {
+          switchToRelay("connection failed");
+        }
+      };
 
       pc.onicecandidate = (e) => {
         if (e.candidate) socket.emit("rtc:ice", { targetSocketId: d.fromSocketId, candidate: e.candidate });
@@ -155,7 +214,7 @@ export function useGuestReceiver(
         dc.onmessage = (ev) => {
           lastActivityRef.current = Date.now();
           if (typeof ev.data === "string") {
-            handleControl(ev.data, pc);
+            handleControl(ev.data);
           } else if (ev.data instanceof ArrayBuffer) {
             const { offset, data } = decodeChunk(ev.data);
             assemblerRef.current?.push(offset, data);
@@ -194,14 +253,42 @@ export function useGuestReceiver(
         return;
       }
       const now = Date.now();
-      const open = dcRef.current?.readyState === "open" && pcRef.current?.connectionState !== "failed";
+      const pc = pcRef.current;
+      const connecting = pc !== null && (pc.connectionState === "new" || pc.connectionState === "connecting");
+      // A fresh direct connection gets time to connect before we intervene.
+      if (connecting && now - offerAtRef.current < CONNECT_TIMEOUT_MS) return;
+      const open = dcRef.current?.readyState === "open" && pc?.connectionState !== "failed";
       const idleFor = now - lastActivityRef.current;
       if (open ? idleFor < STALL_MS : idleFor < 3000) return;
       if (now - lastRequestRef.current < REQUEST_COOLDOWN_MS) return;
+      const reason = open ? `no data for ${Math.round(idleFor / 1000)}s` : connecting ? "never connected" : "connection closed";
+      // Direct connection never came up, or keeps dying: stop trying it.
+      if (!relayRef.current && (connecting || ++p2pFailuresRef.current >= 2)) {
+        switchToRelay(reason);
+        return;
+      }
       lastRequestRef.current = now;
       lastActivityRef.current = now;
-      diag(`stream stalled (${open ? `no data for ${Math.round(idleFor / 1000)}s` : "connection closed"}): asking host for a new one`);
-      socket.emit("guest:stream-request");
+      diag(`stream stalled (${reason}): asking host for a new one${relayRef.current ? " (relay)" : ""}`);
+      socket.emit("guest:stream-request", { relay: relayRef.current });
+    };
+
+    // Relayed stream (server fallback): same protocol as the data channel.
+    const onRelayData = (d: { data: unknown }) => {
+      lastActivityRef.current = Date.now();
+      if (!(dcRef.current instanceof GuestRelayChannel)) {
+        pcRef.current?.close();
+        pcRef.current = null;
+        dcRef.current = new GuestRelayChannel(socket);
+      }
+      const relay = dcRef.current as GuestRelayChannel;
+      if (typeof d.data === "string") {
+        handleControl(d.data);
+      } else if (d.data instanceof ArrayBuffer) {
+        relay.countReceived(d.data.byteLength);
+        const { offset, data } = decodeChunk(d.data);
+        assemblerRef.current?.push(offset, data);
+      }
     };
 
     const timer = setInterval(() => {
@@ -216,17 +303,18 @@ export function useGuestReceiver(
 
     socket.on("rtc:offer", onOffer);
     socket.on("rtc:ice", onIce);
+    socket.on("relay:data", onRelayData);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
       socket.off("rtc:offer", onOffer);
       socket.off("rtc:ice", onIce);
-      pcRef.current?.close();
-      pcRef.current = null;
+      socket.off("relay:data", onRelayData);
+      closeTransport();
       assemblerRef.current?.dispose();
       assemblerRef.current = null;
     };
-  }, [socket, joined, videoRef, dropMedia]);
+  }, [socket, joined, videoRef, dropMedia, relayRef, relayStorageKey]);
 
   useEffect(() => {
     return () => {
@@ -261,5 +349,9 @@ export function useGuestReceiver(
     [dropMedia]
   );
 
-  return { ...state, loadLocalFile };
+  const recoverPlayback = useCallback((reason: string) => assemblerRef.current?.recover(reason) ?? false, []);
+  /** Catching up is slow because the download is, not because playback is broken. */
+  const slowDownload = useCallback(() => assemblerRef.current?.fetchingJump ?? false, []);
+
+  return { ...state, loadLocalFile, recoverPlayback, slowDownload };
 }

@@ -7,6 +7,14 @@ const PICKER_EMOJIS = [
   "\u{1F631}", "\u{1F923}", "\u{1F60E}", "\u{1F634}", "\u{1F440}", "\u{1F4AF}",
 ];
 
+/** Names for the picker's emojis (same order), shown on hover. */
+const PICKER_NAMES = [
+  "Grinning", "Tears of joy", "Heart eyes", "Thinking", "Surprised", "Sad",
+  "Angry", "Thumbs up", "Thumbs down", "Clapping", "Raised hands", "Fire",
+  "Heart", "Party", "Popcorn", "Clapper board", "Movie camera", "Sobbing",
+  "Screaming", "Rolling on the floor laughing", "Cool", "Sleepy", "Eyes", "100",
+];
+
 export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
   const [text, setText] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -22,7 +30,7 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
     <div className="relative border-t border-cinema-surface p-2">
       {pickerOpen && (
         <div className="absolute bottom-full left-2 right-2 mb-1 grid grid-cols-8 gap-1 rounded-xl border border-cinema-surface bg-cinema-panel p-2 shadow-xl">
-          {PICKER_EMOJIS.map((e) => (
+          {PICKER_EMOJIS.map((e, i) => (
             <button
               key={e}
               type="button"
@@ -32,6 +40,7 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
                 setPickerOpen(false);
               }}
               aria-label={`Insert ${e}`}
+              title={PICKER_NAMES[i]}
             >
               {e}
             </button>
@@ -44,6 +53,7 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
           className="touch-target rounded-lg px-2 py-1 text-lg hover:bg-cinema-surface focus:outline-none focus:ring-2 focus:ring-cinema-accent"
           onClick={() => setPickerOpen((o) => !o)}
           aria-label="Emoji picker"
+          title="Add an emoji to your message"
         >
           {"\u{1F600}"}
         </button>
@@ -66,6 +76,7 @@ export function MessageInput({ onSend }: { onSend: (text: string) => void }) {
           className="touch-target rounded-lg bg-cinema-accent px-3 py-1.5 text-sm font-semibold text-white hover:bg-cinema-accent/80 focus:outline-none focus:ring-2 focus:ring-cinema-accent"
           onClick={submit}
           aria-label="Send message"
+          title="Send message (Enter)"
         >
           Send
         </button>

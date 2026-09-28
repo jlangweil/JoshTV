@@ -49,7 +49,7 @@ check("clock:response echoes clientTime + serverTime", clock.clientTime === t0 &
 // arrive in the same frame, before a listener attached after the ack.
 const hostStatePromise = once(host, "sync:state");
 const hostAck = await new Promise((resolve) =>
-  host.emit("room:join", { roomId, name: "Host", color: "#FFB3BA", isHost: true, hostToken }, resolve)
+  host.emit("room:join", { roomId, name: "Host", color: "#FFB3BA", isHost: true, hostToken, build: null }, resolve)
 );
 check("host join ok", hostAck.ok === true);
 await hostStatePromise;
@@ -58,7 +58,7 @@ await hostStatePromise;
 const badAck = await new Promise((resolve) =>
   io(BASE, { transports: ["websocket"] })
     .on("connect", function () {
-      this.emit("room:join", { roomId, name: "Evil", color: "#fff", isHost: true, hostToken: "nope" }, (r) => {
+      this.emit("room:join", { roomId, name: "Evil", color: "#fff", isHost: true, hostToken: "nope", build: null }, (r) => {
         this.disconnect();
         resolve(r);
       });
@@ -69,7 +69,7 @@ check("bad host token rejected", badAck.ok === false);
 // Guest join → receives state + history
 const guestStatePromise = once(guest, "sync:state");
 const guestAck = await new Promise((resolve) =>
-  guest.emit("room:join", { roomId, name: "Guest", color: "#BAE1FF", isHost: false }, resolve)
+  guest.emit("room:join", { roomId, name: "Guest", color: "#BAE1FF", isHost: false, build: null }, resolve)
 );
 check("guest join ok", guestAck.ok === true);
 const guestState = await guestStatePromise;
@@ -89,7 +89,7 @@ const fileId = fileAck.id;
 const late = io(BASE, { transports: ["websocket"] });
 await once(late, "connect");
 const streamReqPromise = once(host, "stream:request");
-late.emit("room:join", { roomId, name: "Late", color: "#E2BAFF", isHost: false }, () => {});
+late.emit("room:join", { roomId, name: "Late", color: "#E2BAFF", isHost: false, build: null }, () => {});
 const streamReq = await streamReqPromise;
 check("host receives stream:request for late guest", typeof streamReq.guestSocketId === "string");
 
@@ -150,9 +150,34 @@ async function joinGuest(name, extra = {}) {
   const s = io(BASE, { transports: ["websocket"] });
   await once(s, "connect");
   await new Promise((resolve) =>
-    s.emit("room:join", { roomId, name, color: "#BAFFC9", isHost: false, ...extra }, resolve)
+    s.emit("room:join", { roomId, name, color: "#BAFFC9", isHost: false, build: null, ...extra }, resolve)
   );
   return s;
+}
+async function joinAck(data) {
+  const s = io(BASE, { transports: ["websocket"] });
+  await once(s, "connect");
+  const ack = await new Promise((resolve) => s.emit("room:join", { roomId, color: "#fff", isHost: false, ...data }, resolve));
+  s.disconnect();
+  return ack;
+}
+
+// Build handshake (only enforced when the server has a production web build).
+const served = await (await fetch(`${BASE}/`)).text();
+const serverBuild = /\/assets\/(index-[\w-]+)\.js/.exec(served)?.[1];
+if (serverBuild) {
+  const legacy = await joinAck({ name: "Old" });
+  check("page without a build id is told to reload", legacy.ok === false && /out of date/i.test(legacy.error));
+  const stale = await joinAck({ name: "Stale", build: "index-OLD" });
+  check("page on an old build is refused as stale", stale.ok === false && stale.error === "stale-build");
+  const current = await joinAck({ name: "Current", build: serverBuild });
+  check("page on the current build joins", current.ok === true);
+  const reconnect = await joinAck({ name: "Reconnect", build: "index-OLD", rejoin: true });
+  check("a reconnect on an old build isn't interrupted", reconnect.ok === true);
+  // Those joins made the host get stream requests; let them land before the next checks.
+  await new Promise((r) => setTimeout(r, 500));
+} else {
+  console.log("SKIP  build handshake (no production web build being served)");
 }
 async function receivesStreamRequest(action, ms = 400) {
   let got = [];

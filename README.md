@@ -55,8 +55,11 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
    server time; the server holds `{playing, currentTime, updatedAt, speed}` per room.
 3. **Drift correction (SP-05..07):** every 500ms guests compute
    `expected = currentTime + (serverNow − updatedAt) × speed` (F# `SyncEngine`).
-   Drift > 1.5s → silent re-seek. Drift > 3s → pause with "Catching up…" overlay,
-   resume when within 0.5s and re-buffered.
+   Drift > 1.5s → silent re-seek. Drift > 3s → "Catching up…": seek a little ahead
+   of the room and keep the video *playing* while it loads (iOS doesn't buffer a
+   paused video, so waiting paused could wait forever). If it's still catching up
+   after 12s, the player's state is logged and it recovers (rebuilds the stream
+   pipeline or reloads the file); after 30s the viewer is offered a Reload button.
 4. **Heartbeat:** the host reports its real playhead every 10s so multi-hour sessions
    never accumulate drift.
 
@@ -76,6 +79,36 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
   The skipped bytes are backfilled afterwards. The same kicks in when the host seeks
   somewhere a guest hasn't downloaded. Joining at 4:00 of a 150MB file over a ~5 MB/s link
   plays in sync in under a second instead of ~24s.
+- **Jumps aim ahead and wait.** While the room is playing, a jump aims a few seconds
+  past the room's position and is left alone until the room gets there, so its data has
+  time to arrive. If the room overtakes it anyway (a slow link), the next jump aims twice
+  as far ahead (up to 60s). Previously a slow viewer re-jumped every 2s, restarting its
+  download each time, and could stay on "Catching up…" forever.
+- **The host's upload is shared by priority.** Guests mark each range request urgent
+  (playback needs it within ~45s) or not (stocking up, backfill). The host pauses non-urgent
+  sending while another viewer has urgent data flowing, so whoever is about to run dry gets
+  the upload first. A guest isn't alarmed by silence while its own request is non-urgent.
+- **Relay fallback.** If a direct (WebRTC) connection to the host never connects, fails, or
+  keeps dying, the guest asks for the movie to be relayed through the server's socket
+  connection instead (same protocol, acknowledged every 128KB for backpressure). The
+  choice is remembered for the room across reloads. Relayed data still comes from the
+  host's upload, and also passes through the server's bandwidth.
+
+### How many viewers?
+
+Every viewer's copy comes from the host's **upload**. Each viewer needs at least the
+movie's bitrate — file size × 8 ÷ running time — and a bit more to recover from jumps and
+hiccups. Keep the total under about two thirds of the upload you actually get (Wi-Fi and
+other household traffic eat into it):
+
+| Movie | Bitrate | Viewers on 35 Mbit/s up (robust) |
+|---|---|---|
+| 2 GB, 2 h | ~2.2 Mbit/s | ~10 |
+| 3 GB, 2 h | ~3.3 Mbit/s | ~7 |
+| 3 GB, 1.5 h | ~4.4 Mbit/s | ~5 |
+
+Past that, everyone plays in bursts. Viewers who pick "use my own copy" cost nothing.
+Once a viewer has downloaded the whole file it stops using upload.
 - Every raw chunk is also retained; when the transfer completes the player switches to
   a **Blob URL** — the whole movie is then natively buffered locally, so playback can
   never be interrupted by network hiccups and any seek is instant.
@@ -151,13 +184,14 @@ verified on a physical iPad.
 
 ### Diagnostics
 
-Safari's dev tools on an iPad need a Mac, so clients report to the server console
-instead. `npm start` prints one line per event, tagged with room and name:
+Safari's dev tools on an iPad need a Mac, so clients report to the server instead. The
+server prints one line per event, tagged with room and name, to the console and to
+`logs/joshtv-YYYY-MM-DD.log` (one file per day, at the repo root):
 
 ```
 16:31:42 [44QHRY] iPad: [client] joined as guest | <user agent> | opfs=true free=10737MB
 16:31:42 [44QHRY] iPad: [client] stream start: 2103MB, storage=disk
-16:31:50 [44QHRY] iPad: [client] jump to 3600s (byte 1402MB, have nothing there)
+16:31:50 [44QHRY] iPad: [client] jump to 3603s (room at 3600s, byte 1402MB, have nothing there)
 16:32:17 [44QHRY] iPad: [client] download complete: playing the whole file from disk
 16:33:05 [44QHRY] iPad: left (transport close)
 ```
@@ -167,6 +201,16 @@ instead. `npm start` prints one line per event, tagged with room and name:
   normal leave.
 - **Crashes.** A tab that crashes leaves no trace itself, but the next load reports it:
   `previous page ended abruptly … while: <what it was doing>`.
+- **Refused joins** are logged with the reason, IP and device: `join refused: Room is full
+  (…)`, `… stale build …`.
+- **Stuck playback:** `stuck catching up: at …s, room at …s, readyState=… buffered=[…]`.
+- **Slow links:** `jump to … room overtook the last jump, downloading at X MB/s, movie plays
+  Y MB/s`. If X stays at or below Y, the host's upload is oversubscribed (see
+  "How many viewers?") or that viewer's connection is too slow.
+- **Relay:** `direct connection failing: relaying the movie through the server`.
+- **Out-of-date pages.** Each page sends its build (the hashed bundle name) when it joins.
+  A page running an old cached copy of the app reloads itself once; a very old one is
+  told to reload. Reconnects within a session aren't interrupted.
 - **Errors.** JS errors and `<video>` errors are reported as they happen.
 
 ## Own-copy mode (local file as the source)
@@ -267,8 +311,10 @@ relay bandwidth applies there.
 
 ## Known limitations (v1)
 
-- Streaming is WebRTC-only; there is no server-relay fallback for networks where
-  NAT traversal fails (would need a TURN server — add one to `RTC_CONFIG`).
+- Where direct connections fail, the movie is relayed through the app server (see
+  "Relay fallback"). A TURN server in `RTC_CONFIG` would offload that from the app server.
+- Every viewer downloads from the host, so the host's upload caps the audience (see
+  "How many viewers?"). Viewers don't share with each other.
 - Jumping to the room's position needs the MP4 index at the front of the file
   ("faststart"). For files with the index at the end, guests wait for the full download.
   `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4` fixes a file without re-encoding.

@@ -150,7 +150,19 @@ interface InnerProps {
 function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: InnerProps) {
   // Guest: id of the file we fully hold, so a reconnect doesn't re-stream it.
   const mediaFileIdRef = useRef<string | null>(null);
-  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef });
+  // Guest: once direct connections to the host fail, the movie is relayed
+  // through the server — remembered for this room across reloads/rejoins.
+  const relayStorageKey = `joshtv-relay-${roomId}`;
+  const relayRef = useRef<boolean>(
+    (() => {
+      try {
+        return sessionStorage.getItem(relayStorageKey) === "1";
+      } catch {
+        return false;
+      }
+    })()
+  );
+  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef, relayRef });
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef, videoRef);
@@ -172,7 +184,9 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
     videoRef,
     conn.fileMeta?.id ?? null,
     getRoomTime,
-    conn.streamToGuests && conn.hostConnected
+    conn.streamToGuests && conn.hostConnected,
+    relayRef,
+    relayStorageKey
   );
   mediaFileIdRef.current = receiver.complete ? receiver.fileId : null;
   const src = isHost ? hostSrc : receiver.src;
@@ -340,12 +354,34 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
   }, [markPlayBlocked]);
 
   // ---- Guest sync ----
-  const { catchingUp } = useDriftSync(
+  // Catching up for far too long: log exactly what the player is doing (the
+  // one report we need to diagnose it), then try to recover — rebuild the
+  // stream pipeline, or reload a whole-file source.
+  const { recoverPlayback } = receiver;
+  const onStuck = useCallback(
+    (v: HTMLVideoElement, expected: number) => {
+      const buffered: string[] = [];
+      for (let i = 0; i < v.buffered.length; i++) {
+        buffered.push(`${v.buffered.start(i).toFixed(0)}-${v.buffered.end(i).toFixed(0)}`);
+      }
+      diag(
+        `stuck catching up: at ${v.currentTime.toFixed(1)}s, room at ${expected.toFixed(1)}s, ` +
+          `readyState=${v.readyState} network=${v.networkState} paused=${v.paused} ` +
+          `error=${v.error?.code ?? "none"} buffered=[${buffered.join(",")}] source=${receiverModeRef.current}`
+      );
+      if (receiverModeRef.current === "mse" && recoverPlayback("stuck catching up")) return;
+      diag("reloading the video to recover");
+      v.load(); // the loadedmetadata handler lands it back on the room's position
+    },
+    [recoverPlayback]
+  );
+  const { catchingUp, stuck } = useDriftSync(
     videoRef,
     conn.playbackState,
     conn.serverNow,
     !isHost && Boolean(src),
-    onAutoplayBlocked
+    onAutoplayBlocked,
+    onStuck
   );
   useBufferReporter(
     conn.socket,
@@ -660,7 +696,21 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
       {/* Own-connection outage */}
       {!conn.connected && conn.joined && <OverlayMessage>Reconnecting…</OverlayMessage>}
       {/* SP-07 */}
-      {catchingUp && !playBlocked && <OverlayMessage>Catching up…</OverlayMessage>}
+      {catchingUp && !playBlocked && !stuck && <OverlayMessage>Catching up…</OverlayMessage>}
+      {catchingUp && !playBlocked && stuck && !isHost && receiver.slowDownload() && (
+        <OverlayMessage>Catching up… the connection to the host is slow right now</OverlayMessage>
+      )}
+      {catchingUp && !playBlocked && stuck && !(!isHost && receiver.slowDownload()) && (
+        <OverlayPrompt>
+          <p className="font-display text-2xl text-cinema-text">Still catching up…</p>
+          <p className="max-w-md text-sm text-cinema-muted">
+            Playback seems stuck on this device. Reloading usually fixes it; you'll rejoin at the room's position.
+          </p>
+          <button type="button" className={PROMPT_BUTTON} onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </OverlayPrompt>
+      )}
       {/* iOS Low Power Mode: even muted playback needs a tap */}
       {!isHost && playBlocked && playing && (
         <OverlayPrompt>
@@ -780,6 +830,7 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
       users={conn.users}
       roomId={roomId}
       onSend={conn.sendChat}
+      onReact={conn.sendReaction}
       open={chatOpen}
       onClose={() => setChatOpen(false)}
     />
@@ -881,7 +932,6 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
               onFullscreen: toggleFullscreen,
               onPip,
               onCaptionFile,
-              onReact: conn.sendReaction,
               onRequestPause: conn.requestPause,
               onToggleChat: () => setChatOpen((o) => !o),
               unreadCount,
