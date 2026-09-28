@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useRef, useState, MutableRefObject, RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, RefObject } from "react";
 import { Socket } from "socket.io-client";
 import { RTC_CONFIG, parseControl, decodeChunk } from "../lib/streamProtocol";
 import { StreamAssembler } from "../lib/StreamAssembler";
 import { diag, mb } from "../lib/diag";
-import { GuestRelayChannel, StreamChannel } from "../lib/relayChannel";
 
 export interface ReceiverState {
   src: string | null;
@@ -19,6 +18,11 @@ export interface ReceiverState {
   totalBytes: number;
   complete: boolean;
   error: string | null;
+  /**
+   * A direct connection to the host can't be made from this network (strict
+   * router, VPN, some mobile networks). Retries continue in the background.
+   */
+  directBlocked: boolean;
 }
 
 const EMPTY: ReceiverState = {
@@ -31,6 +35,7 @@ const EMPTY: ReceiverState = {
   totalBytes: 0,
   complete: false,
   error: null,
+  directBlocked: false,
 };
 
 /** No bytes for this long while incomplete = the connection died (iOS suspends backgrounded pages). */
@@ -59,14 +64,7 @@ export function useGuestReceiver(
   /** Where the room is right now (seconds), so a late joiner fetches that part first. */
   getRoomTime: () => number | null,
   /** The host is connected and streaming to viewers. */
-  streamAvailable: boolean,
-  /**
-   * Relay the movie through the server instead of a direct connection. Set
-   * here when direct connections fail; also sent when (re)joining the room.
-   */
-  relayRef: MutableRefObject<boolean>,
-  /** sessionStorage key remembering relay mode for this room across reloads. */
-  relayStorageKey: string
+  streamAvailable: boolean
 ): ReceiverState & {
   loadLocalFile: (file: File) => void;
   recoverPlayback: (reason: string) => boolean;
@@ -74,8 +72,8 @@ export function useGuestReceiver(
 } {
   const [state, setState] = useState<ReceiverState>(EMPTY);
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const dcRef = useRef<StreamChannel | null>(null);
-  /** Direct-connection attempts that failed or stalled since the last success. */
+  const dcRef = useRef<RTCDataChannel | null>(null);
+  /** Direct-connection attempts that never connected or failed since the last success. */
   const p2pFailuresRef = useRef(0);
   const offerAtRef = useRef(0);
   const assemblerRef = useRef<StreamAssembler | null>(null);
@@ -115,7 +113,7 @@ export function useGuestReceiver(
     if (!joined) return;
     lastActivityRef.current = Date.now();
 
-    /** Drop the current transport (direct connection or relay). */
+    /** Drop the current connection to the host. */
     const closeTransport = () => {
       pcRef.current?.close();
       pcRef.current = null;
@@ -123,22 +121,13 @@ export function useGuestReceiver(
       dcRef.current = null;
     };
 
-    /** Direct connections aren't working from here: route the movie through the server. */
-    const switchToRelay = (reason: string) => {
-      if (!relayRef.current) {
-        relayRef.current = true;
-        try {
-          sessionStorage.setItem(relayStorageKey, "1");
-        } catch {
-          // not remembered across reloads
-        }
-        diag(`direct connection failed (${reason}): switching to relay through the server`);
+    /** A direct connection attempt didn't work; after two, tell the viewer. */
+    const noteP2pFailure = (reason: string) => {
+      p2pFailuresRef.current += 1;
+      if (p2pFailuresRef.current === 2) {
+        diag(`can't connect directly to the host (${reason}): this network may block it; still retrying`);
+        setState((s) => ({ ...s, directBlocked: true }));
       }
-      pcRef.current?.close();
-      pcRef.current = null;
-      lastRequestRef.current = Date.now();
-      lastActivityRef.current = Date.now();
-      socket.emit("guest:stream-request", { relay: true });
     };
 
     const handleControl = (raw: string) => {
@@ -197,10 +186,12 @@ export function useGuestReceiver(
       diag("stream offer received");
       pc.onconnectionstatechange = () => {
         diag(`stream connection: ${pc.connectionState}`);
-        if (pc.connectionState === "connected") p2pFailuresRef.current = 0;
-        // Can't be re-established directly (e.g. a strict router, a network change): relay.
+        if (pc.connectionState === "connected") {
+          p2pFailuresRef.current = 0;
+          setState((s) => (s.directBlocked ? { ...s, directBlocked: false } : s));
+        }
         if (pc.connectionState === "failed" && pcRef.current === pc && !completeRef.current && !localRef.current) {
-          switchToRelay("connection failed");
+          noteP2pFailure("connection failed");
         }
       };
 
@@ -262,33 +253,11 @@ export function useGuestReceiver(
       if (open ? idleFor < STALL_MS : idleFor < 3000) return;
       if (now - lastRequestRef.current < REQUEST_COOLDOWN_MS) return;
       const reason = open ? `no data for ${Math.round(idleFor / 1000)}s` : connecting ? "never connected" : "connection closed";
-      // Direct connection never came up, or keeps dying: stop trying it.
-      if (!relayRef.current && (connecting || ++p2pFailuresRef.current >= 2)) {
-        switchToRelay(reason);
-        return;
-      }
+      if (connecting) noteP2pFailure(reason);
       lastRequestRef.current = now;
       lastActivityRef.current = now;
-      diag(`stream stalled (${reason}): asking host for a new one${relayRef.current ? " (relay)" : ""}`);
-      socket.emit("guest:stream-request", { relay: relayRef.current });
-    };
-
-    // Relayed stream (server fallback): same protocol as the data channel.
-    const onRelayData = (d: { data: unknown }) => {
-      lastActivityRef.current = Date.now();
-      if (!(dcRef.current instanceof GuestRelayChannel)) {
-        pcRef.current?.close();
-        pcRef.current = null;
-        dcRef.current = new GuestRelayChannel(socket);
-      }
-      const relay = dcRef.current as GuestRelayChannel;
-      if (typeof d.data === "string") {
-        handleControl(d.data);
-      } else if (d.data instanceof ArrayBuffer) {
-        relay.countReceived(d.data.byteLength);
-        const { offset, data } = decodeChunk(d.data);
-        assemblerRef.current?.push(offset, data);
-      }
+      diag(`stream stalled (${reason}): asking host for a new one`);
+      socket.emit("guest:stream-request");
     };
 
     const timer = setInterval(() => {
@@ -303,18 +272,16 @@ export function useGuestReceiver(
 
     socket.on("rtc:offer", onOffer);
     socket.on("rtc:ice", onIce);
-    socket.on("relay:data", onRelayData);
     return () => {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
       socket.off("rtc:offer", onOffer);
       socket.off("rtc:ice", onIce);
-      socket.off("relay:data", onRelayData);
       closeTransport();
       assemblerRef.current?.dispose();
       assemblerRef.current = null;
     };
-  }, [socket, joined, videoRef, dropMedia, relayRef, relayStorageKey]);
+  }, [socket, joined, videoRef, dropMedia]);
 
   useEffect(() => {
     return () => {
@@ -344,6 +311,7 @@ export function useGuestReceiver(
         totalBytes: file.size,
         complete: true,
         error: null,
+        directBlocked: false,
       });
     },
     [dropMedia]

@@ -10,7 +10,6 @@ import {
   parseControl,
 } from "../lib/streamProtocol";
 import { diag } from "../lib/diag";
-import { HostRelayChannel, StreamChannel } from "../lib/relayChannel";
 
 interface ByteRange {
   start: number;
@@ -23,10 +22,8 @@ interface ByteRange {
 const URGENT_STALE_MS = 4000;
 
 interface PeerStream {
-  /** Null when relaying through the server. */
-  pc: RTCPeerConnection | null;
-  dc: StreamChannel;
-  relay: boolean;
+  pc: RTCPeerConnection;
+  dc: RTCDataChannel;
   generation: number;
   /** Range being sent; a guest "range" request replaces it mid-flight. */
   job: ByteRange | null;
@@ -38,8 +35,7 @@ interface PeerStream {
 
 /**
  * Host side of the media pipeline: one RTCPeerConnection + DataChannel per
- * guest — or, when a guest can't be reached directly (strict NAT, a network
- * change), the same stream relayed through the server's socket connection. Each guest gets byte 0 onward by default and can redirect the
+ * guest. Each guest gets byte 0 onward by default and can redirect the
  * stream to any range (late join / far seek); chunks go out with
  * backpressure (BF-08). Replacing the file bumps the generation counter,
  * which aborts in-flight send loops and restarts every stream.
@@ -56,7 +52,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     if (peer) {
       try {
         peer.dc.close();
-        peer.pc?.close();
+        peer.pc.close();
       } catch {
         // already closed
       }
@@ -164,7 +160,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
   }, [othersUrgent]);
 
   const openStreamTo = useCallback(
-    async (guestId: string, relay = false) => {
+    async (guestId: string) => {
       const tag = `stream to ${guestId.slice(0, 5)}`;
       if (!fileRef.current) {
         diag(`${tag}: requested, but no file is loaded in this tab`);
@@ -172,28 +168,11 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
       }
       teardownPeer(guestId);
 
-      if (relay) {
-        diag(`${tag}: relaying through the server`);
-        const peer: PeerStream = {
-          pc: null,
-          dc: new HostRelayChannel(socket, guestId),
-          relay: true,
-          generation: generationRef.current,
-          job: null,
-          wake: null,
-          sentAt: 0,
-        };
-        peersRef.current.set(guestId, peer);
-        setActiveStreams(peersRef.current.size);
-        streamFile(guestId, peer);
-        return;
-      }
-
       diag(`${tag}: opening`);
       const pc = new RTCPeerConnection(RTC_CONFIG);
       const dc = pc.createDataChannel("media", { ordered: true });
       dc.binaryType = "arraybuffer";
-      const peer: PeerStream = { pc, dc, relay: false, generation: generationRef.current, job: null, wake: null, sentAt: 0 };
+      const peer: PeerStream = { pc, dc, generation: generationRef.current, job: null, wake: null, sentAt: 0 };
       peersRef.current.set(guestId, peer);
       setActiveStreams(peersRef.current.size);
 
@@ -225,7 +204,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
 
     const onAnswer = async (d: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
       const peer = peersRef.current.get(d.fromSocketId);
-      if (peer?.pc) {
+      if (peer) {
         try {
           await peer.pc.setRemoteDescription(d.sdp);
         } catch (e) {
@@ -235,7 +214,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     };
     const onIce = async (d: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
       const peer = peersRef.current.get(d.fromSocketId);
-      if (peer?.pc && d.candidate) {
+      if (peer && d.candidate) {
         try {
           await peer.pc.addIceCandidate(d.candidate);
         } catch {
@@ -243,17 +222,8 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         }
       }
     };
-    const onStreamRequest = (d: { guestSocketId: string; relay?: boolean }) => {
-      openStreamTo(d.guestSocketId, Boolean(d.relay));
-    };
-    // Relayed streams: range requests and acknowledgements from guests.
-    const onRelayData = (d: { fromSocketId: string; data: unknown }) => {
-      const peer = peersRef.current.get(d.fromSocketId);
-      if (peer?.relay && typeof d.data === "string") (peer.dc as HostRelayChannel).deliver(d.data);
-    };
-    const onRelayAck = (d: { fromSocketId: string; bytes: number }) => {
-      const peer = peersRef.current.get(d.fromSocketId);
-      if (peer?.relay) (peer.dc as HostRelayChannel).ack(Number(d.bytes) || 0);
+    const onStreamRequest = (d: { guestSocketId: string }) => {
+      openStreamTo(d.guestSocketId);
     };
     const onLeave = (d: { user: { id: string } }) => teardownPeer(d.user.id);
 
@@ -261,15 +231,11 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
     socket.on("rtc:ice", onIce);
     socket.on("stream:request", onStreamRequest);
     socket.on("room:leave", onLeave);
-    socket.on("relay:data", onRelayData);
-    socket.on("relay:ack", onRelayAck);
     return () => {
       socket.off("rtc:answer", onAnswer);
       socket.off("rtc:ice", onIce);
       socket.off("stream:request", onStreamRequest);
       socket.off("room:leave", onLeave);
-      socket.off("relay:data", onRelayData);
-      socket.off("relay:ack", onRelayAck);
     };
   }, [socket, joined, openStreamTo, teardownPeer]);
 
@@ -281,7 +247,7 @@ export function useHostStreamer(socket: Socket, joined: boolean) {
         const p = peers.get(id);
         try {
           p?.dc.close();
-          p?.pc?.close();
+          p?.pc.close();
         } catch {
           // ignore
         }

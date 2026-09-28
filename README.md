@@ -88,11 +88,11 @@ node scripts/smoke.mjs             # 26 protocol checks (join, sync, chat, RTC r
   (playback needs it within ~45s) or not (stocking up, backfill). The host pauses non-urgent
   sending while another viewer has urgent data flowing, so whoever is about to run dry gets
   the upload first. A guest isn't alarmed by silence while its own request is non-urgent.
-- **Relay fallback.** If a direct (WebRTC) connection to the host never connects, fails, or
-  keeps dying, the guest asks for the movie to be relayed through the server's socket
-  connection instead (same protocol, acknowledged every 128KB for backpressure). The
-  choice is remembered for the room across reloads. Relayed data still comes from the
-  host's upload, and also passes through the server's bandwidth.
+- **The movie never passes through the server** — only small control messages do, so a
+  free hosting tier's bandwidth allowance isn't at risk. If a viewer's network blocks
+  direct (WebRTC) connections and two attempts fail, they're told so ("Can't reach the
+  host from this network") with the options: another network, no VPN, or their own copy.
+  Retries continue meanwhile, so switching networks recovers on its own.
 
 ### How many viewers?
 
@@ -207,7 +207,7 @@ server prints one line per event, tagged with room and name, to the console and 
 - **Slow links:** `jump to … room overtook the last jump, downloading at X MB/s, movie plays
   Y MB/s`. If X stays at or below Y, the host's upload is oversubscribed (see
   "How many viewers?") or that viewer's connection is too slow.
-- **Relay:** `direct connection failing: relaying the movie through the server`.
+- **Blocked networks:** `can't connect directly to the host (…): this network may block it`.
 - **Out-of-date pages.** Each page sends its build (the hashed bundle name) when it joins.
   A page running an old cached copy of the app reloads itself once; a very old one is
   told to reload. Reconnects within a session aren't interrupted.
@@ -311,8 +311,9 @@ relay bandwidth applies there.
 
 ## Known limitations (v1)
 
-- Where direct connections fail, the movie is relayed through the app server (see
-  "Relay fallback"). A TURN server in `RTC_CONFIG` would offload that from the app server.
+- Viewers on networks that block direct connections can't stream (they can use their own
+  copy). A TURN server in `RTC_CONFIG` would fix that; its bandwidth is billed by the TURN
+  provider, not the app server.
 - Every viewer downloads from the host, so the host's upload caps the audience (see
   "How many viewers?"). Viewers don't share with each other.
 - Jumping to the room's position needs the MP4 index at the front of the file

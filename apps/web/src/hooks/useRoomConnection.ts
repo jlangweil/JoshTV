@@ -56,8 +56,6 @@ interface Options {
   hostToken?: string | null;
   /** Guest: FileMeta.id of media already held, read at each (re)join. */
   mediaFileIdRef?: MutableRefObject<string | null>;
-  /** Guest: direct connections failed, so ask for the movie via the server relay. */
-  relayRef?: MutableRefObject<boolean>;
 }
 
 export function useRoomConnection({
@@ -66,7 +64,6 @@ export function useRoomConnection({
   isHost,
   hostToken,
   mediaFileIdRef,
-  relayRef,
 }: Options): RoomConnection {
   const socket = useMemo(() => {
     const options = {
@@ -158,7 +155,6 @@ export function useRoomConnection({
           takeover,
           build: BUILD_ID,
           rejoin: joinedBeforeRef.current,
-          relay: relayRef?.current ?? false,
         },
         (res: { ok: boolean; error?: string }) => {
           if (res.ok) {
@@ -215,7 +211,7 @@ export function useRoomConnection({
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
     };
-  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, mediaFileIdRef, relayRef]);
+  }, [socket, roomId, identity.name, identity.color, isHost, hostToken, mediaFileIdRef]);
 
   // ---- Room state events ----
   useEffect(() => {

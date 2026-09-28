@@ -147,22 +147,16 @@ interface InnerProps {
   onWatchAsViewer: () => void;
 }
 
+/** Shown when a direct connection to the host can't be made from the viewer's network. */
+const DIRECT_BLOCKED_HELP =
+  "Your network (a strict router, VPN or some mobile networks) is blocking a direct connection. " +
+  "Try another network — e.g. switch between Wi-Fi and mobile data, or turn off a VPN — or use your own copy. " +
+  "It keeps retrying meanwhile.";
+
 function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: InnerProps) {
   // Guest: id of the file we fully hold, so a reconnect doesn't re-stream it.
   const mediaFileIdRef = useRef<string | null>(null);
-  // Guest: once direct connections to the host fail, the movie is relayed
-  // through the server — remembered for this room across reloads/rejoins.
-  const relayStorageKey = `joshtv-relay-${roomId}`;
-  const relayRef = useRef<boolean>(
-    (() => {
-      try {
-        return sessionStorage.getItem(relayStorageKey) === "1";
-      } catch {
-        return false;
-      }
-    })()
-  );
-  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef, relayRef });
+  const conn = useRoomConnection({ roomId, identity, isHost, hostToken, mediaFileIdRef });
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { isFullscreen, toggle: toggleFullscreen } = useFullscreen(containerRef, videoRef);
@@ -184,9 +178,7 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
     videoRef,
     conn.fileMeta?.id ?? null,
     getRoomTime,
-    conn.streamToGuests && conn.hostConnected,
-    relayRef,
-    relayStorageKey
+    conn.streamToGuests && conn.hostConnected
   );
   mediaFileIdRef.current = receiver.complete ? receiver.fileId : null;
   const src = isHost ? hostSrc : receiver.src;
@@ -747,9 +739,16 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
       {!isHost && conn.fileMeta && !src && conn.streamToGuests && (
         <OverlayPrompt>
           <p className="font-display text-2xl text-cinema-text">
-            {receiver.error ? "Can't stream here" : "Connecting to host's stream…"}
+            {receiver.error
+              ? "Can't stream here"
+              : receiver.directBlocked
+                ? "Can't reach the host from this network"
+                : "Connecting to host's stream…"}
           </p>
           {receiver.error && <p className="max-w-md text-sm text-yellow-300">{receiver.error}</p>}
+          {!receiver.error && receiver.directBlocked && (
+            <p className="max-w-md text-sm text-yellow-300">{DIRECT_BLOCKED_HELP}</p>
+          )}
           <p className="text-sm text-cinema-muted">Already have this movie on your computer?</p>
           <FilePickButton onPick={pickLocalCopy} className={PROMPT_BUTTON}>
             Use my own copy
@@ -785,6 +784,11 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
       {localWarning && (
         <div className="absolute left-3 top-3 z-20 max-w-sm rounded-lg bg-black/70 px-2 py-1 text-xs text-yellow-300">
           {localWarning}
+        </div>
+      )}
+      {!isHost && src && receiver.directBlocked && !receiver.complete && !usingLocalCopy && (
+        <div className="absolute left-3 top-3 z-20 max-w-sm rounded-lg bg-black/70 px-2 py-1 text-xs text-yellow-300">
+          Lost the connection to the host and can't reconnect from this network. {DIRECT_BLOCKED_HELP}
         </div>
       )}
       {receiver.error && !receiver.complete && (
