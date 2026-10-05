@@ -39,10 +39,14 @@ function pickMediaSource(): { ctor: MediaSourceCtor; managed: boolean } | null {
 
 /** Bytes handed to mp4box per step. */
 const FEED_STEP_BYTES = 1024 * 1024;
-/** Keep MSE this many seconds ahead of the playhead — no further, to bound memory. */
-const FEED_AHEAD_S = 30;
+/**
+ * Keep MSE this many seconds ahead of the playhead — no further, to bound
+ * memory. Less on iPad/iPhone: an iPad with 3GB of RAM, also running a video
+ * call, gets the tab (and other apps) killed when memory runs short.
+ */
+const FEED_AHEAD_S = isIOS ? 20 : 30;
 /** Trim MSE data this far behind the playhead. */
-const KEEP_BEHIND_S = 30;
+const KEEP_BEHIND_S = isIOS ? 10 : 30;
 /** If the next byte playback needs is missing and this close to the feed position, fetch it now. */
 const PRIORITY_BYTES = 16 * 1024 * 1024;
 /** Without an index this far in, the file isn't "faststart": fall back to full download. */
@@ -94,6 +98,13 @@ export class StreamAssembler {
   receivedBytes = 0;
   totalBytes = 0;
   complete = false;
+  /**
+   * iPad/iPhone: every byte is on disk, but playback stays progressive (fed
+   * from disk) instead of switching to the whole file — Safari playing a
+   * multi-GB file directly ran out of memory ("Media failed to decode", then
+   * the tab crashed).
+   */
+  private downloaded = false;
   mode: "mse" | "blob-pending" | "blob" = "mse";
   /** Using ManagedMediaSource: the video element must have disableRemotePlayback. */
   managed = false;
@@ -156,7 +167,12 @@ export class StreamAssembler {
    * upload — that silence is expected.)
    */
   get expectingData(): boolean {
-    return !this.complete && this.jobUrgent && this.job !== null && this.jobCursor < this.job.end;
+    return !this.complete && !this.downloaded && this.jobUrgent && this.job !== null && this.jobCursor < this.job.end;
+  }
+
+  /** Every byte of the movie is here (whether or not playback switched to the whole file). */
+  get hasWholeFile(): boolean {
+    return this.complete || this.downloaded;
   }
 
   /**
@@ -287,7 +303,7 @@ export class StreamAssembler {
    * point the fresh stream at what's still missing.
    */
   resume(): void {
-    if (this.disposed || this.complete) return;
+    if (this.disposed || this.complete || this.downloaded) return;
     // A fresh stream starts at byte 0. Full-download modes always send a
     // redirect right away; streaming-only may need nothing, so it must know
     // the host is sending in order to tell it to stop.
@@ -330,7 +346,7 @@ export class StreamAssembler {
   }
 
   push(offset: number, buffer: ArrayBuffer): void {
-    if (this.disposed || this.complete) return;
+    if (this.disposed || this.complete || this.downloaded) return;
     const end = offset + buffer.byteLength;
     // Advance the range cursor even for bytes we already have: chunks from an
     // abandoned range can fill part of a newly requested one, and the request
@@ -390,7 +406,7 @@ export class StreamAssembler {
   // ---- Download scheduling ----
 
   private scheduleDownload(): void {
-    if (this.complete || this.finishing) return;
+    if (this.complete || this.finishing || this.downloaded) return;
     const urgentBytes = Math.max(PRIORITY_BYTES, this.mediaBytesPerSecond() * URGENT_AHEAD_S);
     if (this.store.kind === "window") {
       // Streaming only: fetch what's missing just ahead of playback, nothing else.
@@ -696,6 +712,11 @@ export class StreamAssembler {
     this.releaseMse();
     if (this.complete && this.blobUrl) {
       this.cb.onSourceChanged(this.blobUrl, "blob");
+    } else if (this.downloaded) {
+      // Nothing left to download: the whole file is the only way left to play.
+      this.mode = "blob-pending";
+      this.downloaded = false;
+      void this.finish();
     } else if (this.mode === "mse") {
       this.mode = "blob-pending";
       if (this.store.kind === "window") {
@@ -726,7 +747,15 @@ export class StreamAssembler {
   }
 
   private async finish(): Promise<void> {
-    if (this.disposed || this.complete || this.finishing) return;
+    if (this.disposed || this.complete || this.finishing || this.downloaded) return;
+    if (isIOS && this.mode === "mse" && !this.mseFailed && this.store.kind === "disk") {
+      // Keep streaming from disk (see `downloaded`); just stop downloading.
+      this.downloaded = true;
+      this.job = null;
+      this.cb.log("download complete: whole movie on disk, still playing it in pieces (iPad/iPhone)");
+      this.cb.onComplete();
+      return;
+    }
     this.finishing = true;
     const blob = await this.store.finalize(this.totalBytes, "video/mp4");
     if (this.disposed) return;

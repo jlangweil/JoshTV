@@ -142,8 +142,8 @@ export function useGuestReceiver(
         const existing = assemblerRef.current;
         if (existing && mediaFileIdRef.current === msg.fileId) {
           // Reconnected stream for the same file: keep what we have.
-          diag(`stream reconnected: ${existing.complete ? "already complete" : `resuming at ${mb(existing.receivedBytes)}`}`);
-          if (existing.complete) closeTransport();
+          diag(`stream reconnected: ${existing.hasWholeFile ? "already complete" : `resuming at ${mb(existing.receivedBytes)}`}`);
+          if (existing.hasWholeFile) closeTransport();
           else existing.resume();
           return;
         }

@@ -7,7 +7,7 @@ import { useDriftSync } from "../hooks/useDriftSync";
 import { useBufferReporter } from "../hooks/useBufferReporter";
 import { useFullscreen } from "../hooks/useFullscreen";
 import { useWakeLock } from "../hooks/useWakeLock";
-import { togglePictureInPicture } from "../lib/platform";
+import { isIOS, togglePictureInPicture } from "../lib/platform";
 import { attachDiag, diag, leaveBreadcrumb, markCleanExit, mb, takeStartupCrashReport } from "../lib/diag";
 import { storageCapsReady } from "../lib/OpfsStore";
 import { Identity, loadIdentity, saveIdentity, loadHostToken } from "../lib/identity";
@@ -195,7 +195,8 @@ function RoomInner({ roomId, identity, isHost, hostToken, onWatchAsViewer }: Inn
     if (!conn.joined) return;
     storageCapsReady.then((caps) =>
       diag(
-        `joined as ${isHost ? "host" : "guest"} | ${navigator.userAgent} | opfs=${caps.opfs} free=${mb(caps.freeBytes)}`
+        `joined as ${isHost ? "host" : "guest"} | ${isIOS ? "iPad/iPhone | " : ""}${navigator.userAgent} | ` +
+          `opfs=${caps.opfs} free=${mb(caps.freeBytes)}`
       )
     );
     const crashReport = takeStartupCrashReport();
